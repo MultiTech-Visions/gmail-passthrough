@@ -1,0 +1,16 @@
+{
+  "name": "gmail-sender",
+  "version": "1.0.0",
+  "description": "Gmail email sender — Cloud Run service. Sends emails via the Gmail API, replacing SendGrid.",
+  "main": "index.js",
+  "scripts": {
+    "start": "functions-framework --target=gmailSender"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.3.0",
+    "googleapis": "^140.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
