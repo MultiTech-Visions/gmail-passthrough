@@ -204,8 +204,9 @@ Error response:
 ## Testing from Google Apps Script
 
 Drop this into a new Apps Script project, fill in the four constants at the
-top, and run `sendTest`. It sends a "hello world" email to yourself so you
-can verify the deployment end-to-end.
+top, and run `runTest`. It sends a fresh email, then immediately replies
+in-thread using the returned `threadId` — so you verify both the new-email
+path and the in-thread reply path in one shot.
 
 ```js
 const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app'; // no trailing slash
@@ -213,15 +214,27 @@ const API_KEY          = 'YOUR_API_KEY';
 const FROM_ACCOUNT     = 'inbox@yourdomain.com';   // must be in ACCOUNTS_CONFIG
 const TO_ADDRESS       = 'you@yourdomain.com';     // who receives the test
 
-function sendTest() {
-  const payload = {
+function runTest() {
+  // Step 1: send a brand-new email.
+  const newResult = post({
     accountEmail:   FROM_ACCOUNT,
     recipientEmail: TO_ADDRESS,
     subject:        'Hello World from Gmail Sender',
-    body:           'Hello, world!\n\nThis is a test email from the Gmail Sender service.\n\n— sent ' + new Date().toISOString()
+    body:           'Hello, world!\n\nThis is a test email.\n\n— sent ' + new Date().toISOString()
     // htmlBody: '<h1>Hello, world!</h1><p>Optional — omit to auto-generate from body.</p>'
-  };
+  });
+  Logger.log('New email sent. threadId=%s', newResult.threadId);
 
+  // Step 2: reply in-thread to the email we just sent.
+  const replyResult = post({
+    accountEmail: FROM_ACCOUNT,
+    threadId:     newResult.threadId,
+    body:         'Replying in-thread!\n\n— sent ' + new Date().toISOString()
+  });
+  Logger.log('Reply sent. threadId=%s mode=%s', replyResult.threadId, replyResult.mode);
+}
+
+function post(payload) {
   const response = UrlFetchApp.fetch(GMAIL_SENDER_URL + '/send', {
     method: 'post',
     contentType: 'application/json',
@@ -234,14 +247,14 @@ function sendTest() {
   const text = response.getContentText();
   Logger.log('HTTP %s\n%s', code, text);
 
-  if (code !== 200) {
-    throw new Error('Send failed (' + code + '): ' + text);
-  }
+  if (code !== 200) throw new Error('Request failed (' + code + '): ' + text);
+  return JSON.parse(text);
 }
 ```
 
 Notes:
 - `muteHttpExceptions: true` lets you see the real error body on 4xx/5xx
   responses instead of a generic Apps Script exception.
-- On success, the log shows `{"status":"ok","mode":"new","threadId":"...","messageId":"...", ...}`.
+- The first call logs `"mode":"new"`; the second call should log `"mode":"reply"`
+  with the same `threadId`.
 - Uncomment the `htmlBody` line to also exercise the custom-HTML path.
