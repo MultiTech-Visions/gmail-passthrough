@@ -79,9 +79,18 @@ for outbound email.
 | `GMAIL_CLIENT_SECRET` | OAuth2 Client Secret                                           |
 | `ACCOUNTS_CONFIG`     | JSON object with per-account refresh tokens (see below)        |
 
-Generate an `API_KEY` with something like `openssl rand -hex 32` and store it
-in your caller (and in the Cloud Run env var). If `API_KEY` is unset the
-service rejects every request, so a misconfigured deploy can't leak sending.
+Generate an `API_KEY` and store it in your caller (and in the Cloud Run env
+var). If `API_KEY` is unset the service rejects every request, so a
+misconfigured deploy can't leak sending.
+
+Pick whichever is handiest:
+
+- **Browser dev console** (open dev tools → Console tab, paste, hit enter):
+  ```js
+  Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
+  ```
+- **Terminal / Cloud Shell:** `openssl rand -hex 32`
+- **Node:** `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
 
 **`ACCOUNTS_CONFIG`** — a JSON object keyed by email address:
 
@@ -190,3 +199,49 @@ Error response:
 ```json
 { "status": "error", "error": "..." }
 ```
+
+
+## Testing from Google Apps Script
+
+Drop this into a new Apps Script project, fill in the four constants at the
+top, and run `sendTest`. It sends a "hello world" email to yourself so you
+can verify the deployment end-to-end.
+
+```js
+const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app'; // no trailing slash
+const API_KEY          = 'YOUR_API_KEY';
+const FROM_ACCOUNT     = 'inbox@yourdomain.com';   // must be in ACCOUNTS_CONFIG
+const TO_ADDRESS       = 'you@yourdomain.com';     // who receives the test
+
+function sendTest() {
+  const payload = {
+    accountEmail:   FROM_ACCOUNT,
+    recipientEmail: TO_ADDRESS,
+    subject:        'Hello World from Gmail Sender',
+    body:           'Hello, world!\n\nThis is a test email from the Gmail Sender service.\n\n— sent ' + new Date().toISOString()
+    // htmlBody: '<h1>Hello, world!</h1><p>Optional — omit to auto-generate from body.</p>'
+  };
+
+  const response = UrlFetchApp.fetch(GMAIL_SENDER_URL + '/send', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + API_KEY },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+  Logger.log('HTTP %s\n%s', code, text);
+
+  if (code !== 200) {
+    throw new Error('Send failed (' + code + '): ' + text);
+  }
+}
+```
+
+Notes:
+- `muteHttpExceptions: true` lets you see the real error body on 4xx/5xx
+  responses instead of a generic Apps Script exception.
+- On success, the log shows `{"status":"ok","mode":"new","threadId":"...","messageId":"...", ...}`.
+- Uncomment the `htmlBody` line to also exercise the custom-HTML path.
