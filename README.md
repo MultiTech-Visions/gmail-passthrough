@@ -1,8 +1,7 @@
 # Gmail Sender — Cloud Run
 
 A minimal Cloud Run service that sends emails via the Gmail API. Supports
-multiple Gmail accounts from a single deployment. Meant to replace SendGrid
-for outbound email.
+multiple Gmail accounts from a single deployment.
 
 
 ## Files
