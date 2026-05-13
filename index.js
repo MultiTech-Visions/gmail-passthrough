@@ -87,12 +87,17 @@ function requireAdmin(req, res) {
   }
   if (isApiKeyAuthorized(req)) return true;
 
+  const adminUser = process.env.ADMIN_USER;
+  const adminPass = process.env.ADMIN_PASS;
   const header = req.get('authorization') || '';
-  if (header.startsWith('Basic ')) {
+  if (header.startsWith('Basic ') && adminUser && adminPass) {
     const decoded = Buffer.from(header.slice('Basic '.length), 'base64').toString('utf-8');
     const idx = decoded.indexOf(':');
-    const pass = idx >= 0 ? decoded.slice(idx + 1) : decoded;
-    if (pass && timingSafeEqStr(pass, expected)) return true;
+    if (idx >= 0) {
+      const user = decoded.slice(0, idx);
+      const pass = decoded.slice(idx + 1);
+      if (timingSafeEqStr(user, adminUser) && timingSafeEqStr(pass, adminPass)) return true;
+    }
   }
 
   res.set('WWW-Authenticate', 'Basic realm="Gmail Sender Admin", charset="UTF-8"');

@@ -64,9 +64,10 @@ sign-in grants everything in one OAuth dance.
 - **Session.** A signed cookie (`gms_session`, HttpOnly, Secure, SameSite=Lax,
   30-day TTL) tracks the signed-in user's email. Issued after a successful
   Google sign-in; verified via HMAC of `STATE_SECRET`.
-- **Admin.** `/admin/*` and `/api/stats` accept the `API_KEY` via HTTP Basic
-  auth (any username, password = `API_KEY`), or `Authorization: Bearer …`,
-  or `X-API-Key: …`.
+- **Admin.** `/admin/*` and `/api/stats` accept either:
+  - HTTP **Basic** auth with `ADMIN_USER` / `ADMIN_PASS` env vars (browsers
+    prompt automatically), or
+  - `Authorization: Bearer <API_KEY>` / `X-API-Key: <API_KEY>` (for scripts).
 - **API_KEY.** `POST /send` requires the key in `Authorization: Bearer …` or
   `X-API-Key: …`.
 
@@ -117,7 +118,9 @@ The schema is auto-applied on first request via `CREATE TABLE IF NOT EXISTS`.
 
 | Variable                   | Description                                                                 |
 |----------------------------|-----------------------------------------------------------------------------|
-| `API_KEY`                  | Shared secret for `POST /send` and admin endpoints                          |
+| `API_KEY`                  | Shared secret for `POST /send` (also accepted on admin endpoints as Bearer / X-API-Key) |
+| `ADMIN_USER`               | Username for the admin login dialog at `/admin/*`                           |
+| `ADMIN_PASS`               | Password for the admin login dialog at `/admin/*`                           |
 | `STATE_SECRET`             | (optional) HMAC secret for session + OAuth state. Defaults to `API_KEY`.    |
 | `GMAIL_CLIENT_ID`          | OAuth2 Client ID                                                            |
 | `GMAIL_CLIENT_SECRET`      | OAuth2 Client Secret                                                        |
