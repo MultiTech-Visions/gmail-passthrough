@@ -81,19 +81,31 @@ sign-in grants everything in one OAuth dance.
 
 ## Setup
 
-### 1. Enable the Gmail API
+### 1. Kick off the Cloud SQL (MySQL) instance
+
+Provisioning a Cloud SQL instance takes ~5–10 minutes, so start it first
+and complete the other steps while it spins up.
+
+1. **Cloud SQL** → **+ Create Instance** → **MySQL**
+2. Region: pick the one you'll run Cloud Run in
+3. Set a root password and create the instance
+4. Note the **Connection name** (`project:region:instance`)
+
+Leave this tab open and continue with the steps below.
+
+### 2. Enable the Gmail API
 
 1. **Google Cloud Console** → select your project
 2. **APIs & Services → Library** → enable **Gmail API**
 
-### 2. Create OAuth2 credentials
+### 3. Create OAuth2 credentials
 
 1. **APIs & Services → Credentials**
 2. **+ Create Credentials → OAuth client ID**, type **Web application**
 3. **Authorized redirect URIs** → add `https://YOUR-CLOUD-RUN-URL.run.app/oauth/callback`
 4. Copy the **Client ID** and **Client Secret**.
 
-### 3. Configure the OAuth consent screen
+### 4. Configure the OAuth consent screen
 
 Add the scopes the app uses:
 - `openid`, `email`, `profile` (sign-in)
@@ -103,16 +115,16 @@ Add the scopes the app uses:
 If you keep the app in "Testing" mode, add the users you want to allow on
 the test-user list. Otherwise publish it.
 
-### 4. Create the Cloud SQL (MySQL) instance
+### 5. Create the database inside your Cloud SQL instance
 
-1. **Cloud SQL** → **+ Create Instance** → **MySQL**
-2. Region: match your Cloud Run service
-3. Create a database, e.g. `gmail_sender`
-4. Note the **Connection name** (`project:region:instance`)
+The instance from step 1 should be ready by now.
+
+1. Open the instance → **Databases** → **+ Create Database**
+2. Name it (e.g. `gmail_sender`)
 
 The schema is auto-applied on first request via `CREATE TABLE IF NOT EXISTS`.
 
-### 5. Deploy to Cloud Run
+### 6. Deploy to Cloud Run
 
 - Authentication: **Allow unauthenticated** (the app gates itself)
 - Runtime: Node.js 20+
