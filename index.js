@@ -3,10 +3,11 @@ const functions = require('@google-cloud/functions-framework');
 const { getGmailService, invalidateAuthCache } = require('./google-auth.js');
 const { sendEmail } = require('./sender.js');
 const { log } = require('./helpers.js');
-const { getAccount, upsertAccount, setAccountDisabled, deleteAccount, recordSend } = require('./db.js');
+const { getAccount, upsertAccount, setAccountDisabled, deleteAccount, recordSend, deleteApiKeysForAccount } = require('./db.js');
 const { verifyState, buildAuthUrl, exchangeCode, revokeToken } = require('./oauth.js');
 const { getAccountStats, getRecentSends, getErrorBreakdown } = require('./stats.js');
 const { getSession, setSession, clearSession, getCsrfToken, verifyCsrfToken } = require('./session.js');
+const apikeys = require('./apikeys.js');
 const pages = require('./pages.js');
 
 
@@ -28,6 +29,8 @@ functions.http('gmailSender', async (req, res) => {
     if (method === 'POST' && path === '/enable')          return handleEnable(req, res);
     if (method === 'POST' && path === '/remove')          return handleRemove(req, res);
     if (method === 'POST' && path === '/logout')          return handleLogout(req, res);
+    if (method === 'POST' && path === '/keys/create')     return handleCreateKey(req, res);
+    if (method === 'POST' && path === '/keys/revoke')     return handleRevokeKey(req, res);
 
     // ---- Admin (Basic / Bearer / X-API-Key) --------------------------------
     if (method === 'GET'  && path === '/admin/accounts') {
@@ -43,9 +46,8 @@ functions.http('gmailSender', async (req, res) => {
       return handleApiStats(req, res);
     }
 
-    // ---- /send (existing API_KEY) ------------------------------------------
+    // ---- /send -------------------------------------------------------------
     if (path === '/send') {
-      if (!isApiKeyAuthorized(req)) return res.status(401).json({ error: "Unauthorized" });
       return handleSend(req, res);
     }
 
@@ -238,6 +240,7 @@ async function handleRemove(req, res) {
     if (existing) {
       const ok = await revokeToken(existing.refresh_token);
       if (!ok) log("Info", `Token revoke for ${session.email} returned non-OK; deleting row anyway.`);
+      await deleteApiKeysForAccount(session.email);
       await deleteAccount(session.email);
       invalidateAuthCache(session.email);
       log("Info", `Removed ${session.email}`);
@@ -251,11 +254,49 @@ async function handleRemove(req, res) {
 }
 
 
+// ---- API keys (user) -------------------------------------------------------
+
+async function handleCreateKey(req, res) {
+  const session = requireUserCsrf(req, res);
+  if (!session) return;
+  const rawLabel = (req.body && req.body.label) || '';
+  const label = rawLabel.toString().slice(0, 255).trim() || null;
+  try {
+    const { plaintext, last4 } = await apikeys.createKey({ accountEmail: session.email, label });
+    log("Info", `Created API key for ${session.email} (last4=${last4})`);
+    // Re-render the dashboard with the plaintext shown once.
+    return renderUserDashboard(req, res, session.email, { newKey: { plaintext, label } });
+  } catch (e) {
+    log("Error", `Create key failed for ${session.email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not create key: ${e.message}`, { signedIn: true }));
+  }
+}
+
+async function handleRevokeKey(req, res) {
+  const session = requireUserCsrf(req, res);
+  if (!session) return;
+  const id = (req.body && req.body.id) || '';
+  if (!id) return res.status(400).type('html').send(pages.errorPage('Missing key id.', { signedIn: true }));
+  try {
+    const ok = await apikeys.revokeKey({ id, accountEmail: session.email });
+    if (!ok) return res.status(404).type('html').send(pages.errorPage('Key not found.', { signedIn: true }));
+    log("Info", `Revoked API key id=${id} for ${session.email}`);
+    return res.redirect(302, '/');
+  } catch (e) {
+    log("Error", `Revoke key failed for ${session.email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not revoke key: ${e.message}`, { signedIn: true }));
+  }
+}
+
+
 // ---- User dashboard ---------------------------------------------------------
 
-async function renderUserDashboard(req, res, email) {
+async function renderUserDashboard(req, res, email, opts = {}) {
   try {
-    const allStats = await getAccountStats();
+    const [allStats, keys] = await Promise.all([
+      getAccountStats(),
+      apikeys.listKeys(email)
+    ]);
     const summary = allStats.find((s) => s.email === email) || null;
 
     let recent = [], errors = [];
@@ -271,7 +312,9 @@ async function renderUserDashboard(req, res, email) {
       csrfToken: getCsrfToken(),
       summary,
       recent,
-      errors
+      errors,
+      keys,
+      newKey: opts.newKey || null
     }));
   } catch (e) {
     log("Error", `User dashboard failed for ${email}: ${e.message}`);
@@ -305,6 +348,7 @@ async function handleAdminUnenroll(req, res) {
     if (!existing) return res.status(404).type('html').send(pages.errorPage(`No such account: ${email}`));
     const ok = await revokeToken(existing.refresh_token);
     if (!ok) log("Info", `Token revoke for ${email} returned non-OK; deleting row anyway.`);
+    await deleteApiKeysForAccount(email);
     await deleteAccount(email);
     invalidateAuthCache(email);
     log("Info", `Admin-unenrolled ${email}`);
@@ -353,13 +397,52 @@ async function handleApiStats(req, res) {
 
 // ---- /send ------------------------------------------------------------------
 
-async function handleSend(req, res) {
-  const body = req.body || {};
-  const { accountEmail, threadId, recipientEmail, subject, htmlBody } = body;
-  const emailBody = body.body;
+// Extracts the bearer-style credential from either Authorization: Bearer …
+// or X-API-Key: … . Returns null if missing.
+function extractSendCredential(req) {
+  const header = req.get('authorization') || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
+  return bearer || req.get('x-api-key') || null;
+}
 
-  if (!accountEmail) return res.status(400).json({ error: "Missing required field: accountEmail" });
-  if (!emailBody)    return res.status(400).json({ error: "Missing required field: body" });
+// Resolves which Gmail account a /send request is allowed to act as.
+// Returns { accountEmail } on success, { error, status } on failure.
+async function resolveSendAuth(req) {
+  const credential = extractSendCredential(req);
+  if (!credential) return { error: 'Unauthorized', status: 401 };
+
+  // Per-user API keys (preferred). The key identifies the account.
+  if (apikeys.looksLikeUserKey(credential)) {
+    const keyAccount = await apikeys.resolveAccountForKey(credential);
+    if (!keyAccount) return { error: 'Unauthorized', status: 401 };
+
+    const bodyEmail = (req.body && req.body.accountEmail || '').toString().toLowerCase();
+    if (bodyEmail && bodyEmail !== keyAccount) {
+      return { error: `API key does not have permission to send as ${bodyEmail}`, status: 403 };
+    }
+    return { accountEmail: keyAccount };
+  }
+
+  // Legacy fallback: shared API_KEY. Caller must specify accountEmail in body.
+  if (isApiKeyAuthorized(req)) {
+    const bodyEmail = (req.body && req.body.accountEmail || '').toString().toLowerCase();
+    if (!bodyEmail) return { error: 'Missing required field: accountEmail', status: 400 };
+    return { accountEmail: bodyEmail };
+  }
+
+  return { error: 'Unauthorized', status: 401 };
+}
+
+async function handleSend(req, res) {
+  const auth = await resolveSendAuth(req);
+  if (auth.error) return res.status(auth.status).json({ error: auth.error });
+
+  const body = req.body || {};
+  const { threadId, recipientEmail, subject, htmlBody } = body;
+  const emailBody = body.body;
+  const accountEmail = auth.accountEmail;
+
+  if (!emailBody) return res.status(400).json({ error: "Missing required field: body" });
   if (!threadId && !recipientEmail) {
     return res.status(400).json({ error: "Must provide threadId or recipientEmail" });
   }

@@ -66,6 +66,19 @@ async function ensureSchema() {
         INDEX idx_status_sent (status, sent_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        account_email VARCHAR(255) NOT NULL,
+        label VARCHAR(255) NULL,
+        hash CHAR(64) NOT NULL,
+        last4 VARCHAR(4) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_used_at DATETIME NULL,
+        UNIQUE KEY uniq_hash (hash),
+        INDEX idx_account (account_email)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
   })().catch((e) => {
     schemaReady = null;
     log("Error", `Schema init failed: ${e.message}`);
@@ -121,6 +134,69 @@ async function deleteAccount(email) {
   return result.affectedRows > 0;
 }
 
+// ---- API keys --------------------------------------------------------------
+// Keys are looked up by their HMAC hash; the plaintext is never stored.
+
+async function insertApiKey({ accountEmail, label, hash, last4 }) {
+  await ensureSchema();
+  const [result] = await getPool().query(
+    `INSERT INTO api_keys (account_email, label, hash, last4) VALUES (?, ?, ?, ?)`,
+    [accountEmail.toLowerCase(), label || null, hash, last4]
+  );
+  return result.insertId;
+}
+
+async function listApiKeys(accountEmail) {
+  await ensureSchema();
+  const [rows] = await getPool().query(
+    `SELECT id, label, last4, created_at, last_used_at
+     FROM api_keys
+     WHERE account_email = ?
+     ORDER BY created_at DESC`,
+    [accountEmail.toLowerCase()]
+  );
+  return rows;
+}
+
+async function revokeApiKey(id, accountEmail) {
+  await ensureSchema();
+  const [result] = await getPool().query(
+    `DELETE FROM api_keys WHERE id = ? AND account_email = ?`,
+    [Number(id), accountEmail.toLowerCase()]
+  );
+  return result.affectedRows > 0;
+}
+
+// Look up an API key by its hash and bump last_used_at. Returns the account
+// email the key belongs to, or null if not found.
+async function findAccountForApiKeyHash(hash) {
+  await ensureSchema();
+  const conn = await getPool().getConnection();
+  try {
+    const [rows] = await conn.query(
+      `SELECT id, account_email FROM api_keys WHERE hash = ?`,
+      [hash]
+    );
+    if (rows.length === 0) return null;
+    const { id, account_email } = rows[0];
+    await conn.query(
+      `UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [id]
+    ).catch(() => {}); // not fatal
+    return account_email;
+  } finally {
+    conn.release();
+  }
+}
+
+async function deleteApiKeysForAccount(accountEmail) {
+  await ensureSchema();
+  await getPool().query(
+    `DELETE FROM api_keys WHERE account_email = ?`,
+    [accountEmail.toLowerCase()]
+  );
+}
+
 async function recordSend({ accountEmail, recipient, subject, threadId, mode, status, errorMessage }) {
   await ensureSchema();
   const conn = await getPool().getConnection();
@@ -149,5 +225,10 @@ module.exports = {
   upsertAccount,
   setAccountDisabled,
   deleteAccount,
-  recordSend
+  recordSend,
+  insertApiKey,
+  listApiKeys,
+  revokeApiKey,
+  findAccountForApiKeyHash,
+  deleteApiKeysForAccount
 };

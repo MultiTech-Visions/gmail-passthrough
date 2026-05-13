@@ -109,7 +109,7 @@ function fmtDate(d) {
 // exists — there's no separate "connect" step. `summary` is null only in
 // the unusual case where the cookie outlived the DB row (e.g. the account
 // was removed via /admin/unenroll); in that case we show a re-sign-in card.
-function userDashboard({ email, csrfToken, summary, recent, errors }) {
+function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null }) {
   const missing = !summary;
   const disabled = !!(summary && summary.disabled);
 
@@ -196,11 +196,59 @@ function userDashboard({ email, csrfToken, summary, recent, errors }) {
       </table>`;
   })();
 
+  const keysBlock = missing ? '' : (() => {
+    const newKeyCallout = newKey ? `
+      <div class="card" style="border-color:#f0a500; background: #fff8e1;">
+        <strong>Copy this key now — it won't be shown again.</strong>
+        ${newKey.label ? `<div class="muted">Label: ${esc(newKey.label)}</div>` : ''}
+        <pre style="background:#fff; padding:0.75rem; border:1px solid #e5e5e5; border-radius:6px; overflow:auto; user-select:all; margin:0.5rem 0 0;"><code>${esc(newKey.plaintext)}</code></pre>
+      </div>` : '';
+
+    const listRows = keys.length === 0
+      ? `<tr><td colspan="5"><div class="empty">No API keys yet. Create one to send mail through <code>POST /send</code>.</div></td></tr>`
+      : keys.map((k) => `
+          <tr>
+            <td>${esc(k.label || '(no label)')}</td>
+            <td><code>gms_…${esc(k.last4)}</code></td>
+            <td>${fmtDate(k.created_at)}</td>
+            <td>${fmtDate(k.last_used_at)}</td>
+            <td>
+              <form class="inline" method="POST" action="/keys/revoke"
+                    onsubmit="return confirm('Revoke this key? Any caller still using it will start getting 401s.');">
+                <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+                <input type="hidden" name="id" value="${esc(String(k.id))}">
+                <button class="btn danger" type="submit">Revoke</button>
+              </form>
+            </td>
+          </tr>`).join('');
+
+    return `
+      <h2>API keys</h2>
+      <p class="muted" style="margin-top:0;">Each key sends mail as <code>${esc(email)}</code> only. If a key leaks, revoke it — your other keys keep working.</p>
+      ${newKeyCallout}
+      <div class="card">
+        <form method="POST" action="/keys/create" class="row" style="margin:0;">
+          <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+          <label class="grow">
+            <div class="muted" style="font-size:0.8rem;">Label (optional)</div>
+            <input name="label" type="text" maxlength="255" placeholder="e.g. notifications-cron"
+                   style="width:100%; padding:0.55rem; border:1px solid #ccc; border-radius:6px; font:inherit;">
+          </label>
+          <button class="btn" type="submit">Create key</button>
+        </form>
+      </div>
+      <table>
+        <thead><tr><th>Label</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody>${listRows}</tbody>
+      </table>`;
+  })();
+
   return layout('Your account', `
     ${userHeader(email, csrfToken)}
     <h1>Your account</h1>
     ${stateCard}
     ${statsBlock}
+    ${keysBlock}
     ${errorBlock}
     ${recentBlock}
   `);

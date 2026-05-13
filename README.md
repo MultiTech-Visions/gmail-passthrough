@@ -18,9 +18,12 @@ sees their own dashboard, and can connect or disconnect their Gmail.
      with a single click.
    - **Remove account** — revokes the refresh token at Google and deletes
      the row. The user is signed out.
-3. A separate `POST /send` endpoint (protected by `API_KEY`) is what your
-   other services hit when they want to send mail through a connected
-   account.
+3. On the same dashboard the user creates one or more **API keys**, each
+   scoped to their account only. Your other services hit `POST /send` with
+   one of these keys to send mail. Each key is shown in plaintext once at
+   creation time; only an HMAC hash is stored, so a DB dump doesn't expose
+   live keys. The user can revoke any leaked key without affecting the
+   others.
 
 A user can only manage their own Gmail. There's no separate "connect" step —
 sign-in grants everything in one OAuth dance.
@@ -54,10 +57,12 @@ sign-in grants everything in one OAuth dance.
 | POST   | `/enable`             | session+CSRF  | Resume sending                                    |
 | POST   | `/remove`             | session+CSRF  | Revoke + delete + sign out                        |
 | POST   | `/logout`             | session+CSRF  | Clear the session cookie                          |
+| POST   | `/keys/create`        | session+CSRF  | Create a new API key for the signed-in user       |
+| POST   | `/keys/revoke`        | session+CSRF  | Revoke one of the signed-in user's API keys       |
 | GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view)          |
 | POST   | `/admin/unenroll`     | admin+CSRF    | Admin force-removes any account                   |
 | GET    | `/api/stats`          | admin         | JSON stats — all accounts or one                  |
-| POST   | `/send`               | API_KEY       | Send an email (reply in-thread or new)            |
+| POST   | `/send`               | user key (or legacy `API_KEY`) | Send an email (reply in-thread or new)   |
 
 ### Auth
 
@@ -68,8 +73,14 @@ sign-in grants everything in one OAuth dance.
   - HTTP **Basic** auth with `ADMIN_USER` / `ADMIN_PASS` env vars (browsers
     prompt automatically), or
   - `Authorization: Bearer <API_KEY>` / `X-API-Key: <API_KEY>` (for scripts).
-- **API_KEY.** `POST /send` requires the key in `Authorization: Bearer …` or
-  `X-API-Key: …`.
+- **`POST /send`** accepts either:
+  - A **per-user API key** (prefix `gms_…`) in `Authorization: Bearer …` or
+    `X-API-Key: …`. The key identifies which Gmail account the caller can
+    send as — they cannot send as anyone else.
+  - The legacy **`API_KEY`** env var, also via `Authorization: Bearer …` or
+    `X-API-Key: …`. With this credential the caller must specify
+    `accountEmail` in the request body. Kept for migration; prefer per-user
+    keys for new integrations.
 
 
 ## Setup
@@ -135,11 +146,19 @@ Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32`.
 
 ## `POST /send`
 
-Authentication: send `API_KEY` in `Authorization: Bearer <key>` or
-`X-API-Key: <key>`. Missing or wrong key → `401`.
+Authentication: send a credential in either `Authorization: Bearer <key>` or
+`X-API-Key: <key>`. The credential can be:
 
-If `threadId` matches a real Gmail thread on the account, the service
-replies in-thread; otherwise sends a brand-new email to `recipientEmail`.
+- **A per-user API key** (recommended). Created from the user's dashboard,
+  shaped `gms_<48 hex chars>`. The key is bound to that user's Gmail
+  account; `accountEmail` in the body is optional and, if provided, must
+  match — otherwise `/send` returns `403`.
+- **The legacy `API_KEY`** env var. With this credential `accountEmail` in
+  the body is required (it's how the service knows which account to use).
+
+Missing or wrong credential → `401`. If `threadId` matches a real Gmail
+thread on the account, the service replies in-thread; otherwise sends a
+brand-new email to `recipientEmail`.
 
 Request body:
 
@@ -156,7 +175,7 @@ Request body:
 
 | Field            | Required? | Notes                                                           |
 |------------------|-----------|-----------------------------------------------------------------|
-| `accountEmail`   | yes       | Which Gmail account to send from (must be connected via the UI) |
+| `accountEmail`   | conditional | Optional with a per-user API key; required with legacy `API_KEY`. |
 | `body`           | yes       | Plain-text body (newlines preserved)                            |
 | `htmlBody`       | no        | HTML body. If omitted, auto-generated from `body`               |
 | `recipientEmail` | see notes | Required if no `threadId`. Overrides the auto-detected reply-to |
@@ -186,6 +205,18 @@ CREATE TABLE accounts (
   enrolled_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_used_at   DATETIME     NULL,
   total_sends    BIGINT       NOT NULL DEFAULT 0
+);
+
+CREATE TABLE api_keys (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  account_email  VARCHAR(255) NOT NULL,
+  label          VARCHAR(255) NULL,
+  hash           CHAR(64)     NOT NULL,         -- HMAC of the plaintext key
+  last4          VARCHAR(4)   NOT NULL,         -- displayed in the UI
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at   DATETIME     NULL,
+  UNIQUE KEY uniq_hash (hash),
+  INDEX idx_account (account_email)
 );
 
 CREATE TABLE send_logs (
