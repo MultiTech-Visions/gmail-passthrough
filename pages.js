@@ -14,7 +14,7 @@ const STYLES = `
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         max-width: 1600px; margin: 2rem auto; padding: 0 1.5rem; }
+         max-width: min(1920px, 95vw); margin: 2rem auto; padding: 0 1.5rem; }
   h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
   h2 { margin: 2rem 0 0.5rem; font-size: 1.15rem; }
   .sub { color: #666; margin-bottom: 1.5rem; }
@@ -46,6 +46,16 @@ const STYLES = `
   .stat .l { color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .empty { color: #888; padding: 1.25rem; text-align: center; border: 1px dashed #ddd; border-radius: 8px; }
   form.inline { display: inline; }
+  dl.fields { margin: 0.5rem 0 0; }
+  dl.fields dt { margin-top: 0.75rem; }
+  dl.fields dt:first-child { margin-top: 0; }
+  dl.fields dt .req { color: #888; font-size: 0.78rem; margin-left: 0.4rem;
+                      text-transform: uppercase; letter-spacing: 0.04em; }
+  dl.fields dd { margin: 0.15rem 0 0; color: #555; }
+  @media (prefers-color-scheme: dark) {
+    dl.fields dd { color: #aaa; }
+    dl.fields dt .req { color: #777; }
+  }
   .two-col { display: grid; gap: 1.5rem;
              grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
   .two-col > section > h2:first-child { margin-top: 0.5rem; }
@@ -276,17 +286,20 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       </div>
       <div class="card">
         <strong>Body fields</strong>
-        <table style="margin-top:0.5rem;">
-          <thead><tr><th>Field</th><th>Required?</th><th>Notes</th></tr></thead>
-          <tbody>
-            <tr><td><code>body</code></td><td>yes</td><td>Plain-text body (newlines preserved)</td></tr>
-            <tr><td><code>recipientEmail</code></td><td>see notes</td><td>Required unless <code>threadId</code> is provided (in which case the reply-to address is read from the thread).</td></tr>
-            <tr><td><code>threadId</code></td><td>no</td><td>Gmail thread ID. If found, the message is sent as an in-thread reply with the right <code>In-Reply-To</code> / <code>References</code> headers.</td></tr>
-            <tr><td><code>subject</code></td><td>no</td><td>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</td></tr>
-            <tr><td><code>htmlBody</code></td><td>no</td><td>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</td></tr>
-            <tr><td><code>accountEmail</code></td><td>no</td><td>Optional when using a per-user API key (the key already binds the call to <code>${esc(email)}</code>). If you do include it, it must match.</td></tr>
-          </tbody>
-        </table>
+        <dl class="fields">
+          <dt><code>body</code><span class="req">required</span></dt>
+          <dd>Plain-text body (newlines preserved).</dd>
+          <dt><code>recipientEmail</code><span class="req">conditional</span></dt>
+          <dd>Required unless <code>threadId</code> is provided (in which case the reply-to address is read from the thread).</dd>
+          <dt><code>threadId</code><span class="req">optional</span></dt>
+          <dd>Gmail thread ID. If found, the message is sent as an in-thread reply with the right <code>In-Reply-To</code> / <code>References</code> headers.</dd>
+          <dt><code>subject</code><span class="req">optional</span></dt>
+          <dd>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</dd>
+          <dt><code>htmlBody</code><span class="req">optional</span></dt>
+          <dd>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</dd>
+          <dt><code>accountEmail</code><span class="req">optional</span></dt>
+          <dd>Optional when using a per-user API key (the key already binds the call to <code>${esc(email)}</code>). If you do include it, it must match.</dd>
+        </dl>
       </div>
       <div class="card">
         <strong>Success response</strong>
