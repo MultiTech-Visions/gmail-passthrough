@@ -25,6 +25,7 @@ async function getAccountStats() {
     const w = byEmail.get(a.email) || {};
     return {
       email: a.email,
+      disabled: !!a.disabled,
       enrolledAt: a.enrolled_at,
       lastUsedAt: a.last_used_at,
       totalSends: Number(a.total_sends || 0),
