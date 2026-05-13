@@ -297,8 +297,6 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
           <dd>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</dd>
           <dt><code>htmlBody</code><span class="req">optional</span></dt>
           <dd>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</dd>
-          <dt><code>accountEmail</code><span class="req">optional</span></dt>
-          <dd>Optional when using a per-user API key (the key already binds the call to <code>${esc(email)}</code>). If you do include it, it must match.</dd>
         </dl>
       </div>
       <div class="card">

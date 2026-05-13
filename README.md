@@ -62,7 +62,7 @@ sign-in grants everything in one OAuth dance.
 | GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view)          |
 | POST   | `/admin/unenroll`     | admin+CSRF    | Admin force-removes any account                   |
 | GET    | `/api/stats`          | admin         | JSON stats — all accounts or one                  |
-| POST   | `/send`               | user key (or legacy `API_KEY`) | Send an email (reply in-thread or new)   |
+| POST   | `/send`               | user key      | Send an email (reply in-thread or new)            |
 
 ### Auth
 
@@ -73,14 +73,10 @@ sign-in grants everything in one OAuth dance.
   - HTTP **Basic** auth with `ADMIN_USER` / `ADMIN_PASS` env vars (browsers
     prompt automatically), or
   - `Authorization: Bearer <API_KEY>` / `X-API-Key: <API_KEY>` (for scripts).
-- **`POST /send`** accepts either:
-  - A **per-user API key** (prefix `gms_…`) in `Authorization: Bearer …` or
-    `X-API-Key: …`. The key identifies which Gmail account the caller can
-    send as — they cannot send as anyone else.
-  - The legacy **`API_KEY`** env var, also via `Authorization: Bearer …` or
-    `X-API-Key: …`. With this credential the caller must specify
-    `accountEmail` in the request body. Kept for migration; prefer per-user
-    keys for new integrations.
+- **`POST /send`** requires a **per-user API key** (prefix `gms_…`) in
+  `Authorization: Bearer …` or `X-API-Key: …`. The key identifies which
+  Gmail account the caller can send as — there is no way to act as a
+  different account.
 
 
 ## Setup
@@ -146,25 +142,19 @@ Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32`.
 
 ## `POST /send`
 
-Authentication: send a credential in either `Authorization: Bearer <key>` or
-`X-API-Key: <key>`. The credential can be:
+Authentication: send a per-user API key (created from the dashboard, shaped
+`gms_<48 hex chars>`) in either `Authorization: Bearer <key>` or
+`X-API-Key: <key>`. The key identifies which Gmail account the call will
+send as — there is no way to override that from the request. Missing or
+wrong key → `401`.
 
-- **A per-user API key** (recommended). Created from the user's dashboard,
-  shaped `gms_<48 hex chars>`. The key is bound to that user's Gmail
-  account; `accountEmail` in the body is optional and, if provided, must
-  match — otherwise `/send` returns `403`.
-- **The legacy `API_KEY`** env var. With this credential `accountEmail` in
-  the body is required (it's how the service knows which account to use).
-
-Missing or wrong credential → `401`. If `threadId` matches a real Gmail
-thread on the account, the service replies in-thread; otherwise sends a
-brand-new email to `recipientEmail`.
+If `threadId` matches a real Gmail thread on the account, the service
+replies in-thread; otherwise sends a brand-new email to `recipientEmail`.
 
 Request body:
 
 ```json
 {
-  "accountEmail":   "inbox@yourdomain.com",
   "body":           "The plain-text body",
   "htmlBody":       "<p>The HTML body</p>",
   "recipientEmail": "patient@example.com",
@@ -175,7 +165,6 @@ Request body:
 
 | Field            | Required? | Notes                                                           |
 |------------------|-----------|-----------------------------------------------------------------|
-| `accountEmail`   | conditional | Optional with a per-user API key; required with legacy `API_KEY`. |
 | `body`           | yes       | Plain-text body (newlines preserved)                            |
 | `htmlBody`       | no        | HTML body. If omitted, auto-generated from `body`               |
 | `recipientEmail` | see notes | Required if no `threadId`. Overrides the auto-detected reply-to |
@@ -247,13 +236,11 @@ drop the env var and redeploy.
 
 ```js
 const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app';
-const API_KEY          = 'YOUR_API_KEY';
-const FROM_ACCOUNT     = 'inbox@yourdomain.com';
+const API_KEY          = 'gms_...';                  // your per-user API key
 const TO_ADDRESS       = 'you@yourdomain.com';
 
 function runTest() {
   const r = post({
-    accountEmail:   FROM_ACCOUNT,
     recipientEmail: TO_ADDRESS,
     subject:        'Hello from Gmail Sender',
     body:           'Hello, world!\n\n— ' + new Date().toISOString()

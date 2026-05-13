@@ -410,50 +410,25 @@ async function handleApiStats(req, res) {
 
 // ---- /send ------------------------------------------------------------------
 
-// Extracts the bearer-style credential from either Authorization: Bearer …
-// or X-API-Key: … . Returns null if missing.
-function extractSendCredential(req) {
+// Resolves the account a /send request acts as, from the per-user API key in
+// `Authorization: Bearer …` or `X-API-Key: …`. The key is the only auth path
+// and the only way the account is identified — request bodies do not carry an
+// account email.
+async function resolveSendAccount(req) {
   const header = req.get('authorization') || '';
   const bearer = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
-  return bearer || req.get('x-api-key') || null;
-}
-
-// Resolves which Gmail account a /send request is allowed to act as.
-// Returns { accountEmail } on success, { error, status } on failure.
-async function resolveSendAuth(req) {
-  const credential = extractSendCredential(req);
-  if (!credential) return { error: 'Unauthorized', status: 401 };
-
-  // Per-user API keys (preferred). The key identifies the account.
-  if (apikeys.looksLikeUserKey(credential)) {
-    const keyAccount = await apikeys.resolveAccountForKey(credential);
-    if (!keyAccount) return { error: 'Unauthorized', status: 401 };
-
-    const bodyEmail = (req.body && req.body.accountEmail || '').toString().toLowerCase();
-    if (bodyEmail && bodyEmail !== keyAccount) {
-      return { error: `API key does not have permission to send as ${bodyEmail}`, status: 403 };
-    }
-    return { accountEmail: keyAccount };
-  }
-
-  // Legacy fallback: shared API_KEY. Caller must specify accountEmail in body.
-  if (isApiKeyAuthorized(req)) {
-    const bodyEmail = (req.body && req.body.accountEmail || '').toString().toLowerCase();
-    if (!bodyEmail) return { error: 'Missing required field: accountEmail', status: 400 };
-    return { accountEmail: bodyEmail };
-  }
-
-  return { error: 'Unauthorized', status: 401 };
+  const credential = bearer || req.get('x-api-key') || null;
+  if (!credential || !apikeys.looksLikeUserKey(credential)) return null;
+  return apikeys.resolveAccountForKey(credential);
 }
 
 async function handleSend(req, res) {
-  const auth = await resolveSendAuth(req);
-  if (auth.error) return res.status(auth.status).json({ error: auth.error });
+  const accountEmail = await resolveSendAccount(req);
+  if (!accountEmail) return res.status(401).json({ error: 'Unauthorized' });
 
   const body = req.body || {};
   const { threadId, recipientEmail, subject, htmlBody } = body;
   const emailBody = body.body;
-  const accountEmail = auth.accountEmail;
 
   if (!emailBody) return res.status(400).json({ error: "Missing required field: body" });
   if (!threadId && !recipientEmail) {
