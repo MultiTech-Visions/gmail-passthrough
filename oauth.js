@@ -1,15 +1,14 @@
 const crypto = require('crypto');
 const { google } = require('googleapis');
 
-// Scopes we request during enrollment. gmail.send is the minimum to send;
-// gmail.modify lets us look up thread metadata for in-thread replies.
-const SCOPES = [
+const LOGIN_SCOPES   = ['openid', 'email', 'profile'];
+const CONNECT_SCOPES = [
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/gmail.modify'
 ];
 
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const VALID_ACTIONS = new Set(['enroll', 'unenroll-self']);
+const VALID_ACTIONS = new Set(['login', 'connect']);
 
 function getStateSecret() {
   const secret = process.env.STATE_SECRET || process.env.API_KEY;
@@ -32,7 +31,7 @@ function buildOAuthClient() {
 }
 
 // Stateless signed state token: base64url(payload).hex(hmac(payload)).
-// Payload is JSON: { action, target?, exp, nonce }.
+// Payload: { action: 'login' | 'connect', exp, nonce, returnTo? }.
 function signState(payload) {
   const json = JSON.stringify({ ...payload, exp: Date.now() + STATE_TTL_MS, nonce: crypto.randomBytes(8).toString('hex') });
   const b64 = Buffer.from(json, 'utf-8').toString('base64url');
@@ -51,21 +50,55 @@ function verifyState(token) {
   }
   const payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf-8'));
   if (!payload.exp || Date.now() > payload.exp) throw new Error('State expired');
+  if (!VALID_ACTIONS.has(payload.action)) throw new Error(`Invalid action: ${payload.action}`);
   return payload;
 }
 
-function buildAuthUrl(state) {
+function buildAuthUrl(action, extraStatePayload = {}) {
+  if (!VALID_ACTIONS.has(action)) throw new Error(`Invalid action: ${action}`);
   const client = buildOAuthClient();
-  return client.generateAuthUrl({
+  const state = signState({ action, ...extraStatePayload });
+  const scope = action === 'login' ? LOGIN_SCOPES : CONNECT_SCOPES;
+
+  const opts = {
     access_type: 'offline',
-    prompt: 'consent',  // force Google to return a refresh_token even if user has consented before
-    scope: SCOPES,
+    scope,
     state,
     include_granted_scopes: true
-  });
+  };
+  // For `connect` we must force the consent screen so Google always returns a
+  // refresh_token. For `login` we don't need a refresh_token, so we can skip
+  // the prompt for a smoother UX.
+  if (action === 'connect') opts.prompt = 'consent';
+
+  return client.generateAuthUrl(opts);
 }
 
-async function exchangeCode(code) {
+// Login: verify the id_token Google returned and pull the email claim out of
+// it. No Gmail scopes needed.
+async function exchangeLoginCode(code) {
+  const client = buildOAuthClient();
+  const { tokens } = await client.getToken(code);
+  if (!tokens.id_token) {
+    throw new Error('Google did not return an id_token; cannot identify user.');
+  }
+  const ticket = await client.verifyIdToken({
+    idToken: tokens.id_token,
+    audience: process.env.GMAIL_CLIENT_ID
+  });
+  const payload = ticket.getPayload();
+  if (!payload || !payload.email) {
+    throw new Error('Google id_token did not include an email claim.');
+  }
+  if (payload.email_verified === false) {
+    throw new Error('Google reports this email is not verified.');
+  }
+  return { email: payload.email.toLowerCase() };
+}
+
+// Connect: exchange the code for a refresh_token and look up the email via
+// gmail.users.getProfile (we have the gmail scopes here).
+async function exchangeConnectCode(code) {
   const client = buildOAuthClient();
   const { tokens } = await client.getToken(code);
   if (!tokens.refresh_token) {
@@ -80,7 +113,6 @@ async function exchangeCode(code) {
 }
 
 async function revokeToken(refreshToken) {
-  // Returns true if Google accepts the revoke; otherwise logs and returns false.
   const params = new URLSearchParams({ token: refreshToken });
   const resp = await fetch('https://oauth2.googleapis.com/revoke', {
     method: 'POST',
@@ -90,30 +122,12 @@ async function revokeToken(refreshToken) {
   return resp.ok;
 }
 
-// HMAC of a fixed string with STATE_SECRET. Embedded in admin forms to defend
-// against CSRF: a cross-origin page can't read the dashboard HTML to lift this
-// value, but a logged-in admin's browser will submit it correctly.
-function getAdminCsrfToken() {
-  return crypto.createHmac('sha256', getStateSecret()).update('admin-csrf').digest('hex');
-}
-
-function verifyAdminCsrfToken(token) {
-  if (!token || typeof token !== 'string') return false;
-  const expected = getAdminCsrfToken();
-  const a = Buffer.from(token);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
 module.exports = {
   signState,
   verifyState,
   buildAuthUrl,
-  exchangeCode,
+  exchangeLoginCode,
+  exchangeConnectCode,
   revokeToken,
-  getRedirectUri,
-  getAdminCsrfToken,
-  verifyAdminCsrfToken,
-  VALID_ACTIONS
+  getRedirectUri
 };

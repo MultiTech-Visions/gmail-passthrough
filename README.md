@@ -1,183 +1,138 @@
 # Gmail Sender — Cloud Run
 
-A minimal Cloud Run service that sends emails via the Gmail API. Supports
-multiple Gmail accounts from a single deployment, with **self-serve OAuth
-enrollment**, an enrolled-accounts dashboard, and per-account send stats.
+A Cloud Run service that sends mail through the Gmail API on behalf of
+users who connect their Google accounts. Each user signs in with Google,
+sees their own dashboard, and can connect or disconnect their Gmail.
+
+
+## How it works
+
+1. A user visits the site, clicks **Sign in with Google**, and authenticates.
+2. They land on their own dashboard. If they haven't granted send permission
+   yet, they click **Connect** to do so. (Google's consent screen appears,
+   they grant `gmail.send` + `gmail.modify`, and Google returns a refresh
+   token, which is saved to the database keyed by their email.)
+3. From the same dashboard, they can see their send stats and click
+   **Disconnect** at any time to revoke access.
+4. A separate `POST /send` endpoint (protected by a shared API key) is what
+   your other services hit when they want to send mail through a connected
+   account.
+
+A user can only connect / disconnect their own Gmail. The Google sign-in
+identifies them; the connect flow verifies the granted account matches the
+signed-in account.
 
 
 ## Files
 
-| File             | Purpose                                                    |
-|------------------|------------------------------------------------------------|
-| `index.js`       | HTTP entry point and route dispatch                        |
-| `google-auth.js` | Per-account OAuth2 clients (DB-backed, with env fallback)  |
-| `sender.js`      | Sends email replies (in-thread) or new emails via Gmail    |
-| `oauth.js`       | OAuth start/callback + signed state tokens + revoke        |
-| `pages.js`       | Server-rendered HTML (enroll page, dashboard, detail)      |
-| `db.js`          | MySQL connection pool, schema, accounts/log queries        |
-| `stats.js`       | Per-account totals, recent sends, error breakdown          |
-| `helpers.js`     | Structured logging                                         |
-| `package.json`   | Dependencies and start script                              |
+| File             | Purpose                                                |
+|------------------|--------------------------------------------------------|
+| `index.js`       | HTTP entry point and route dispatch                    |
+| `session.js`     | Signed-cookie session + CSRF token helpers             |
+| `oauth.js`       | OAuth start / login / connect / revoke                 |
+| `pages.js`       | Server-rendered HTML (login, dashboard, success pages) |
+| `google-auth.js` | Per-account OAuth2 clients (DB-backed, cached)         |
+| `sender.js`      | Builds and sends Gmail messages                        |
+| `db.js`          | MySQL pool, schema, queries                            |
+| `stats.js`       | Per-account totals, recent sends, error breakdown      |
+| `helpers.js`     | Structured logging                                     |
 
 
 ## Routes
 
-| Method | Path                | Auth     | Description                                  |
-|--------|---------------------|----------|----------------------------------------------|
-| GET    | `/`                 | none     | Health check                                 |
-| GET    | `/enroll`           | none     | Landing page — "Connect" / "Disconnect"      |
-| GET    | `/oauth/start`      | none     | Begins Google OAuth flow                     |
-| GET    | `/oauth/callback`   | none     | Google redirects here with the auth code     |
-| GET    | `/accounts`         | admin    | Dashboard listing every enrolled account     |
-| GET    | `/account?email=…`  | admin    | Detail view for one account                  |
-| GET    | `/api/stats`        | admin    | JSON stats — all accounts or one             |
-| POST   | `/admin/unenroll`   | admin    | Admin removes an account (revokes + deletes) |
-| POST   | `/send`             | API_KEY  | Send an email (reply in-thread or new)       |
+| Method | Path                  | Auth          | Description                              |
+|--------|-----------------------|---------------|------------------------------------------|
+| GET    | `/healthz`            | none          | Health check                             |
+| GET    | `/`                   | none          | Login page (if signed out) or dashboard  |
+| GET    | `/login`              | none          | "Sign in with Google" page               |
+| GET    | `/login/start`        | none          | Begins Google sign-in flow               |
+| GET    | `/connect/start`      | session       | Begins Gmail-scope grant for current user|
+| GET    | `/oauth/callback`     | none          | Google redirects here with auth code     |
+| POST   | `/disconnect`         | session+CSRF  | Revoke + delete the current user's Gmail |
+| POST   | `/logout`             | session+CSRF  | Clear the session cookie                 |
+| GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view) |
+| POST   | `/admin/unenroll`     | admin+CSRF    | Admin removes any account                |
+| GET    | `/api/stats`          | admin         | JSON stats — all accounts or one         |
+| POST   | `/send`               | API_KEY       | Send an email (reply in-thread or new)   |
 
 ### Auth
 
-- **API_KEY** routes (`/send`): send the key in `Authorization: Bearer <key>`
-  or `X-API-Key: <key>`.
-- **Admin** routes (the dashboard, account detail, stats API, admin unenroll):
-  protected by the same shared secret as `API_KEY`. Three accepted forms:
-  - HTTP **Basic** auth (browsers will prompt automatically): any username,
-    password = `API_KEY`.
-  - `Authorization: Bearer <API_KEY>`
-  - `X-API-Key: <API_KEY>`
-
-The **enrollment** flow (`/enroll`, `/oauth/*`) is intentionally public —
-Google's OAuth flow guarantees that whoever clicks "Connect" can only
-enroll a Gmail account they own. The same is true of the self-serve
-"Disconnect my account" button: it removes whatever account Google
-authenticates them as, and nothing else.
+- **Session.** A signed cookie (`gms_session`, HttpOnly, Secure, SameSite=Lax,
+  30-day TTL) tracks the signed-in user's email. Issued after a successful
+  Google sign-in; verified via HMAC of `STATE_SECRET`.
+- **Admin.** `/admin/*` and `/api/stats` accept the `API_KEY` via HTTP Basic
+  auth (any username, password = `API_KEY`), or `Authorization: Bearer …`,
+  or `X-API-Key: …`.
+- **API_KEY.** `POST /send` requires the key in `Authorization: Bearer …` or
+  `X-API-Key: …`.
 
 
 ## Setup
 
 ### 1. Enable the Gmail API
 
-1. Go to **Google Cloud Console** → select your project
-2. **APIs & Services** → **Library** → enable **Gmail API**
+1. **Google Cloud Console** → select your project
+2. **APIs & Services → Library** → enable **Gmail API**
 
-### 2. Create OAuth2 Credentials
+### 2. Create OAuth2 credentials
 
-1. **APIs & Services** → **Credentials**
-2. **+ Create Credentials** → **OAuth client ID**
-3. Application type: **Web application**
-4. Under **Authorized redirect URIs**, add the URL where this service will
-   handle the OAuth callback:
-   `https://YOUR-CLOUD-RUN-URL.run.app/oauth/callback`
-5. **Create**, then copy the **Client ID** and **Client Secret**.
+1. **APIs & Services → Credentials**
+2. **+ Create Credentials → OAuth client ID**, type **Web application**
+3. **Authorized redirect URIs** → add `https://YOUR-CLOUD-RUN-URL.run.app/oauth/callback`
+4. Copy the **Client ID** and **Client Secret**.
 
-(You no longer need to use the OAuth Playground per account — enrollment is
-self-serve via `/enroll`.)
+### 3. Configure the OAuth consent screen
 
-### 3. Create the Cloud SQL (MySQL) instance
+Add the scopes the app uses:
+- `openid`, `email`, `profile` (sign-in)
+- `https://www.googleapis.com/auth/gmail.send` (sending)
+- `https://www.googleapis.com/auth/gmail.modify` (in-thread replies)
+
+If you keep the app in "Testing" mode, add the users you want to allow on
+the test-user list. Otherwise publish it.
+
+### 4. Create the Cloud SQL (MySQL) instance
 
 1. **Cloud SQL** → **+ Create Instance** → **MySQL**
-2. Pick a region close to your Cloud Run service
-3. Set a strong password for the `root` user (or create a dedicated user)
-4. Create a database, e.g. `gmail_sender`
-5. Note the **Connection name** (format: `project:region:instance`)
-6. Under **Connections**, enable the Cloud SQL Admin API (link is in the UI)
+2. Region: match your Cloud Run service
+3. Create a database, e.g. `gmail_sender`
+4. Note the **Connection name** (`project:region:instance`)
 
-The service runs `CREATE TABLE IF NOT EXISTS` on first request, so you don't
-need to apply a schema manually.
+The schema is auto-applied on first request via `CREATE TABLE IF NOT EXISTS`.
 
-### 4. Deploy to Cloud Run
+### 5. Deploy to Cloud Run
 
-1. **Cloud Run** → **+ Create Service**
-2. Configure:
-   - Region: same as your Cloud SQL instance
-   - Authentication: **Allow unauthenticated** (the OAuth flow + dashboard
-     are public; `/send` enforces its own API_KEY)
-   - Memory: 256 MB
-   - Timeout: 60s
-   - Runtime: Node.js 20+
-   - Entry point: `gmailSender`
-3. Under **Cloud SQL connections**, attach your instance — this exposes a
-   Unix socket at `/cloudsql/<connection name>`.
-4. Add the environment variables listed below.
-5. **Deploy**.
+- Authentication: **Allow unauthenticated** (the app gates itself)
+- Runtime: Node.js 20+
+- Entry point: `gmailSender`
+- Attach your Cloud SQL instance under **Cloud SQL connections**
+- Set the env vars below
 
 
 ## Environment Variables
 
 | Variable                   | Description                                                                 |
 |----------------------------|-----------------------------------------------------------------------------|
-| `API_KEY`                  | Shared secret required on every `POST /send` request                        |
-| `STATE_SECRET`             | (optional) HMAC secret for OAuth state tokens. Defaults to `API_KEY`.       |
+| `API_KEY`                  | Shared secret for `POST /send` and admin endpoints                          |
+| `STATE_SECRET`             | (optional) HMAC secret for session + OAuth state. Defaults to `API_KEY`.    |
 | `GMAIL_CLIENT_ID`          | OAuth2 Client ID                                                            |
 | `GMAIL_CLIENT_SECRET`      | OAuth2 Client Secret                                                        |
-| `OAUTH_REDIRECT_URI`       | Must match the URI you registered in the OAuth client (ends `/oauth/callback`) |
-| `INSTANCE_CONNECTION_NAME` | Cloud SQL connection name `project:region:instance` (Cloud Run socket mode) |
+| `OAUTH_REDIRECT_URI`       | Must match the URI registered above (ends `/oauth/callback`)                |
+| `INSTANCE_CONNECTION_NAME` | Cloud SQL connection name `project:region:instance` (socket mode)           |
 | `DB_HOST` / `DB_PORT`      | Alternative to `INSTANCE_CONNECTION_NAME` for direct TCP (local dev)        |
-| `DB_USER`                  | MySQL user                                                                  |
-| `DB_PASS`                  | MySQL password                                                              |
-| `DB_NAME`                  | MySQL database name (e.g. `gmail_sender`)                                   |
+| `DB_USER` / `DB_PASS` / `DB_NAME` | MySQL credentials                                                    |
 | `ACCOUNTS_CONFIG`          | (legacy) Pre-DB JSON-keyed accounts; used as a fallback if DB has no row.   |
 
-Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32` (or any of):
-
-- **Browser dev console:**
-  ```js
-  Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
-  ```
-- **Node:** `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-
-
-## Enrolling an account (self-serve)
-
-1. Send the user to `https://YOUR-CLOUD-RUN-URL.run.app/enroll`
-2. They click **Connect a Gmail account**, sign in with Google, and grant
-   the requested scopes (`gmail.send`, `gmail.modify`).
-3. Google redirects back to `/oauth/callback`; the service exchanges the
-   code, looks up the account's email via `users.getProfile`, and upserts a
-   row into `accounts` with the refresh token.
-
-Re-running enrollment for the same email simply rotates the stored refresh
-token.
-
-
-## Unenrolling
-
-There are two paths, depending on who's doing it:
-
-- **Self-serve.** Send the user to `/enroll` and have them click **Disconnect
-  my account**. They sign in with Google, and the service removes whichever
-  account Google authenticates them as — they can only remove their own.
-- **Admin.** From `/accounts`, click **Unenroll** next to the row. The
-  service revokes the refresh token at Google's `/revoke` endpoint and
-  deletes the row. No OAuth round-trip required (admin already proved
-  identity by signing in to the dashboard).
-
-
-## Stats
-
-The dashboard at `/accounts` shows, per account:
-
-- Total sends (lifetime)
-- Sends in the last 24 hours / 7 days / 30 days
-- Error count (30 days)
-- Last-used timestamp
-
-`/account?email=…` adds a recent-sends log (last 50) and an error breakdown
-grouped by error message. The same data is available as JSON at
-`/api/stats` (all) or `/api/stats?email=…` (one).
+Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32`.
 
 
 ## `POST /send`
 
-Authentication: send the configured `API_KEY` in either of:
+Authentication: send `API_KEY` in `Authorization: Bearer <key>` or
+`X-API-Key: <key>`. Missing or wrong key → `401`.
 
-- `Authorization: Bearer <API_KEY>`
-- `X-API-Key: <API_KEY>`
-
-Missing or wrong key → `401 Unauthorized`.
-
-If `threadId` matches a real Gmail thread on the account, the service replies
-in-thread (with `In-Reply-To` / `References` headers set so the recipient's
-client threads it). Otherwise a brand-new email is sent to `recipientEmail`.
+If `threadId` matches a real Gmail thread on the account, the service
+replies in-thread; otherwise sends a brand-new email to `recipientEmail`.
 
 Request body:
 
@@ -194,7 +149,7 @@ Request body:
 
 | Field            | Required? | Notes                                                           |
 |------------------|-----------|-----------------------------------------------------------------|
-| `accountEmail`   | yes       | Which Gmail account to send from (must be enrolled)             |
+| `accountEmail`   | yes       | Which Gmail account to send from (must be connected via the UI) |
 | `body`           | yes       | Plain-text body (newlines preserved)                            |
 | `htmlBody`       | no        | HTML body. If omitted, auto-generated from `body`               |
 | `recipientEmail` | see notes | Required if no `threadId`. Overrides the auto-detected reply-to |
@@ -202,30 +157,19 @@ Request body:
 | `subject`        | no        | On replies, defaults to `Re: <original subject>`                |
 
 Every email is sent as `multipart/alternative` with both a `text/plain` and a
-`text/html` part.
+`text/html` part. Every attempt — success or error — is logged to
+`send_logs`.
 
 Success response:
 
 ```json
-{
-  "status": "ok",
-  "mode": "reply",
-  "threadId": "...",
-  "messageId": "...",
-  "to": "...",
-  "subject": "..."
-}
+{ "status": "ok", "mode": "reply", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }
 ```
 
-Error response: `{ "status": "error", "error": "..." }`
-
-Every attempt — success or failure — is recorded to `send_logs` and shows up
-in the dashboard.
+`mode` is `"reply"` when the message went in-thread, `"new"` otherwise.
 
 
 ## Schema
-
-The two tables are created on demand:
 
 ```sql
 CREATE TABLE accounts (
@@ -254,16 +198,13 @@ CREATE TABLE send_logs (
 
 ## Migrating from `ACCOUNTS_CONFIG`
 
-For a soft cutover: keep `ACCOUNTS_CONFIG` set during the first deploy.
-The DB is checked first; if no row exists, the legacy env var is used as a
-fallback. Once each account has re-enrolled via `/enroll`, drop the env var
-and redeploy.
+For a soft cutover: keep `ACCOUNTS_CONFIG` set during the first deploy. The
+DB is checked first; if no row exists, the legacy env var is used as a
+fallback. Once each user has signed in and connected their Gmail via the UI,
+drop the env var and redeploy.
 
 
-## Testing from Google Apps Script
-
-Drop this into a new Apps Script project, fill in the four constants at the
-top, and run `runTest`.
+## Testing `/send` from Google Apps Script
 
 ```js
 const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app';
@@ -272,33 +213,25 @@ const FROM_ACCOUNT     = 'inbox@yourdomain.com';
 const TO_ADDRESS       = 'you@yourdomain.com';
 
 function runTest() {
-  const newResult = post({
+  const r = post({
     accountEmail:   FROM_ACCOUNT,
     recipientEmail: TO_ADDRESS,
-    subject:        'Hello World from Gmail Sender',
-    body:           'Hello, world!\n\n— sent ' + new Date().toISOString()
+    subject:        'Hello from Gmail Sender',
+    body:           'Hello, world!\n\n— ' + new Date().toISOString()
   });
-  Logger.log('New email sent. threadId=%s', newResult.threadId);
-
-  const replyResult = post({
-    accountEmail: FROM_ACCOUNT,
-    threadId:     newResult.threadId,
-    body:         'Replying in-thread!\n\n— sent ' + new Date().toISOString()
-  });
-  Logger.log('Reply sent. threadId=%s mode=%s', replyResult.threadId, replyResult.mode);
+  Logger.log('threadId=%s', r.threadId);
 }
 
 function post(payload) {
-  const response = UrlFetchApp.fetch(GMAIL_SENDER_URL + '/send', {
+  const r = UrlFetchApp.fetch(GMAIL_SENDER_URL + '/send', {
     method: 'post',
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + API_KEY },
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
-  const code = response.getResponseCode();
-  const text = response.getContentText();
-  if (code !== 200) throw new Error('Request failed (' + code + '): ' + text);
-  return JSON.parse(text);
+  const code = r.getResponseCode();
+  if (code !== 200) throw new Error('HTTP ' + code + ': ' + r.getContentText());
+  return JSON.parse(r.getContentText());
 }
 ```
