@@ -14,7 +14,7 @@ const STYLES = `
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         max-width: 1280px; margin: 2rem auto; padding: 0 1.5rem; }
+         max-width: 1600px; margin: 2rem auto; padding: 0 1.5rem; }
   h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
   h2 { margin: 2rem 0 0.5rem; font-size: 1.15rem; }
   .sub { color: #666; margin-bottom: 1.5rem; }
@@ -46,10 +46,13 @@ const STYLES = `
   .stat .l { color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .empty { color: #888; padding: 1.25rem; text-align: center; border: 1px dashed #ddd; border-radius: 8px; }
   form.inline { display: inline; }
-  .two-col { display: grid; gap: 1.5rem; grid-template-columns: 1fr; align-items: start; }
+  .two-col { display: grid; gap: 1.5rem;
+             grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
   .two-col > section > h2:first-child { margin-top: 0.5rem; }
-  @media (min-width: 1024px) {
-    .two-col { grid-template-columns: 1fr 1fr; }
+  .main-layout { display: grid; gap: 1.5rem; grid-template-columns: 1fr; align-items: start; }
+  .main-layout > section { min-width: 0; }
+  @media (min-width: 1280px) {
+    .main-layout { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
   }
   @media (prefers-color-scheme: dark) {
     body { background: #1a1a1a; color: #ddd; }
@@ -295,16 +298,20 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
   return layout('Your account', `
     ${userHeader(email, csrfToken)}
     <h1>Your account</h1>
-    ${stateCard}
-    ${statsBlock}
-    ${missing ? '' : `
-      <div class="two-col">
-        <section>${keysBlock}</section>
-        <section>${usageBlock}</section>
+    ${missing ? stateCard : `
+      <div class="main-layout">
+        <section>
+          ${stateCard}
+          ${statsBlock}
+          <div class="two-col">
+            <section>${keysBlock}</section>
+            <section>${usageBlock}</section>
+          </div>
+          ${errorBlock}
+        </section>
+        <section>${recentBlock}</section>
       </div>
     `}
-    ${errorBlock}
-    ${recentBlock}
   `);
 }
 
