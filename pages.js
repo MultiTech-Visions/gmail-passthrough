@@ -46,6 +46,18 @@ const STYLES = `
   .stat .l { color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .empty { color: #888; padding: 1.25rem; text-align: center; border: 1px dashed #ddd; border-radius: 8px; }
   form.inline { display: inline; }
+  pre.terminal, pre.codeblock {
+    padding: 0.75rem; border-radius: 6px; overflow: auto; margin: 0.5rem 0 0;
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre.terminal { background: #0b1020; color: #e6e6e6; }
+  pre.codeblock { background: #f4f4f4; color: #1a1a1a; }
+  pre.terminal code, pre.codeblock code {
+    background: transparent; color: inherit; padding: 0; font: inherit;
+  }
+  @media (prefers-color-scheme: dark) {
+    pre.codeblock { background: #2a2a2a; color: #e6e6e6; }
+  }
   dl.fields { margin: 0.5rem 0 0; }
   dl.fields dt { margin-top: 0.75rem; }
   dl.fields dt:first-child { margin-top: 0; }
@@ -220,7 +232,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       <div class="card" style="border-color:#f0a500; background: #fff8e1;">
         <strong>Copy this key now — it won't be shown again.</strong>
         ${newKey.label ? `<div class="muted">Label: ${esc(newKey.label)}</div>` : ''}
-        <pre style="background:#fff; padding:0.75rem; border:1px solid #e5e5e5; border-radius:6px; overflow:auto; user-select:all; margin:0.5rem 0 0;"><code>${esc(newKey.plaintext)}</code></pre>
+        <pre class="codeblock" style="user-select:all;"><code>${esc(newKey.plaintext)}</code></pre>
       </div>` : '';
 
     const listRows = keys.length === 0
@@ -282,7 +294,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       </p>
       <div class="card">
         <strong>Example request</strong>
-        <pre style="background:#0b1020; color:#e6e6e6; padding:0.75rem; border-radius:6px; overflow:auto; margin:0.5rem 0 0; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;"><code>${esc(curl)}</code></pre>
+        <pre class="terminal"><code>${esc(curl)}</code></pre>
       </div>
       <div class="card">
         <strong>Body fields</strong>
@@ -301,7 +313,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       </div>
       <div class="card">
         <strong>Success response</strong>
-        <pre style="background:#f4f4f4; padding:0.75rem; border-radius:6px; overflow:auto; margin:0.5rem 0 0; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;"><code>${esc('{ "status": "ok", "mode": "new", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }')}</code></pre>
+        <pre class="codeblock"><code>${esc('{ "status": "ok", "mode": "new", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }')}</code></pre>
         <p class="muted" style="margin: 0.5rem 0 0;"><code>mode</code> is <code>"reply"</code> when the message went in-thread, <code>"new"</code> otherwise.</p>
       </div>`;
   })();
