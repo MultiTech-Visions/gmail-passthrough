@@ -5,7 +5,9 @@ const crypto = require('crypto');
 // session store needed.
 
 const COOKIE_NAME = 'gms_session';
+const FLASH_COOKIE = 'gms_flash';
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const FLASH_TTL_MS = 5 * 60 * 1000;       // 5 minutes
 
 function getSecret() {
   const secret = process.env.STATE_SECRET || process.env.API_KEY;
@@ -83,6 +85,47 @@ function clearSession(res) {
   res.set('Set-Cookie', attrs.join('; '));
 }
 
+// Flash cookie: a one-shot signed payload for carrying data across a redirect
+// (e.g. "show this new key once"). Set before a 302, consumed on the next GET.
+function setFlash(res, payload) {
+  const json = JSON.stringify({ ...payload, exp: Date.now() + FLASH_TTL_MS });
+  const b64 = Buffer.from(json, 'utf-8').toString('base64url');
+  const sig = crypto.createHmac('sha256', getSecret()).update(b64).digest('hex');
+  const value = `${b64}.${sig}`;
+  const attrs = [
+    `${FLASH_COOKIE}=${encodeURIComponent(value)}`,
+    'Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax',
+    `Max-Age=${Math.floor(FLASH_TTL_MS / 1000)}`
+  ];
+  res.append('Set-Cookie', attrs.join('; '));
+}
+
+function consumeFlash(req, res) {
+  const cookies = parseCookies(req);
+  const token = cookies[FLASH_COOKIE];
+  if (!token) return null;
+
+  // Clear the cookie regardless of whether it parses, so a tampered or stale
+  // flash doesn't stick around.
+  res.append('Set-Cookie', `${FLASH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [b64, sig] = parts;
+  const expected = crypto.createHmac('sha256', getSecret()).update(b64).digest('hex');
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+    return null;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf-8'));
+  } catch {
+    return null;
+  }
+  if (!payload.exp || Date.now() > payload.exp) return null;
+  return payload;
+}
+
 // Static CSRF token derived from STATE_SECRET; embedded in user-facing forms.
 // Same pattern as the admin one but in a different namespace so the values
 // don't collide.
@@ -103,6 +146,8 @@ module.exports = {
   getSession,
   setSession,
   clearSession,
+  setFlash,
+  consumeFlash,
   getCsrfToken,
   verifyCsrfToken
 };

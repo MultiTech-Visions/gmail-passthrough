@@ -14,7 +14,7 @@ const STYLES = `
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body { font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         max-width: 880px; margin: 2rem auto; padding: 0 1rem; }
+         max-width: min(1920px, 95vw); margin: 2rem auto; padding: 0 1.5rem; }
   h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
   h2 { margin: 2rem 0 0.5rem; font-size: 1.15rem; }
   .sub { color: #666; margin-bottom: 1.5rem; }
@@ -39,12 +39,43 @@ const STYLES = `
   code { background: #f4f4f4; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.9em; }
   header.top { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
   header.top .who { color: #666; font-size: 0.9rem; }
-  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin: 0.5rem 0 1rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 0.75rem; margin: 0.5rem 0 1rem; }
   .stat { padding: 0.75rem; border: 1px solid #e5e5e5; border-radius: 6px; }
   .stat .n { font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
   .stat .l { color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .empty { color: #888; padding: 1.25rem; text-align: center; border: 1px dashed #ddd; border-radius: 8px; }
   form.inline { display: inline; }
+  pre.terminal, pre.codeblock {
+    padding: 0.75rem; border-radius: 6px; overflow: auto; margin: 0.5rem 0 0;
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre.terminal { background: #0b1020; color: #e6e6e6; }
+  pre.codeblock { background: #f4f4f4; color: #1a1a1a; }
+  pre.terminal code, pre.codeblock code {
+    background: transparent; color: inherit; padding: 0; font: inherit;
+  }
+  @media (prefers-color-scheme: dark) {
+    pre.codeblock { background: #2a2a2a; color: #e6e6e6; }
+  }
+  dl.fields { margin: 0.5rem 0 0; }
+  dl.fields dt { margin-top: 0.75rem; }
+  dl.fields dt:first-child { margin-top: 0; }
+  dl.fields dt .req { color: #888; font-size: 0.78rem; margin-left: 0.4rem;
+                      text-transform: uppercase; letter-spacing: 0.04em; }
+  dl.fields dd { margin: 0.15rem 0 0; color: #555; }
+  @media (prefers-color-scheme: dark) {
+    dl.fields dd { color: #aaa; }
+    dl.fields dt .req { color: #777; }
+  }
+  .two-col { display: grid; gap: 1.5rem;
+             grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
+  .two-col > section > h2:first-child { margin-top: 0.5rem; }
+  .main-layout { display: grid; gap: 1.5rem; grid-template-columns: 1fr; align-items: start; }
+  .main-layout > section { min-width: 0; }
+  @media (min-width: 1280px) {
+    .main-layout { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  }
   @media (prefers-color-scheme: dark) {
     body { background: #1a1a1a; color: #ddd; }
     .card, .stat, th, td { border-color: #333; }
@@ -88,10 +119,10 @@ function loginPage() {
   return layout('Gmail Sender — Sign in', `
     <div style="margin-top: 4rem; text-align: center;">
       <h1>Gmail Sender</h1>
-      <p class="sub">Sign in with Google to let this service send mail on behalf of your Gmail account.</p>
+      <p class="sub">Send mail programmatically through your Gmail account.</p>
       <p><a class="btn" href="/login/start">Sign in with Google</a></p>
       <p class="muted" style="font-size:0.85rem; margin-top:1rem; max-width:32rem; margin-left:auto; margin-right:auto;">
-        Signing in requests permission to send mail as your account. You can pause sending or remove the connection at any time.
+        You can pause or remove the connection at any time.
       </p>
     </div>
   `);
@@ -109,7 +140,7 @@ function fmtDate(d) {
 // exists — there's no separate "connect" step. `summary` is null only in
 // the unusual case where the cookie outlived the DB row (e.g. the account
 // was removed via /admin/unenroll); in that case we show a re-sign-in card.
-function userDashboard({ email, csrfToken, summary, recent, errors }) {
+function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null, sendUrl = '' }) {
   const missing = !summary;
   const disabled = !!(summary && summary.disabled);
 
@@ -196,13 +227,120 @@ function userDashboard({ email, csrfToken, summary, recent, errors }) {
       </table>`;
   })();
 
+  const keysBlock = missing ? '' : (() => {
+    const newKeyCallout = newKey ? `
+      <div class="card" style="border-color:#f0a500; background: #fff8e1;">
+        <strong>Copy this key now — it won't be shown again.</strong>
+        ${newKey.label ? `<div class="muted">Label: ${esc(newKey.label)}</div>` : ''}
+        <pre class="codeblock" style="user-select:all;">${esc(newKey.plaintext)}</pre>
+      </div>` : '';
+
+    const listRows = keys.length === 0
+      ? `<tr><td colspan="5"><div class="empty">No API keys yet. Create one to send mail through <code>POST /send</code>.</div></td></tr>`
+      : keys.map((k) => `
+          <tr>
+            <td>${esc(k.label || '(no label)')}</td>
+            <td><code>gms_…${esc(k.last4)}</code></td>
+            <td>${fmtDate(k.created_at)}</td>
+            <td>${fmtDate(k.last_used_at)}</td>
+            <td>
+              <form class="inline" method="POST" action="/keys/revoke"
+                    onsubmit="return confirm('Revoke this key? Any caller still using it will start getting 401s.');">
+                <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+                <input type="hidden" name="id" value="${esc(String(k.id))}">
+                <button class="btn danger" type="submit">Revoke</button>
+              </form>
+            </td>
+          </tr>`).join('');
+
+    return `
+      <h2>API keys</h2>
+      <p class="muted" style="margin-top:0;">Each key sends mail as <code>${esc(email)}</code> only. If a key leaks, revoke it — your other keys keep working.</p>
+      ${newKeyCallout}
+      <div class="card">
+        <form method="POST" action="/keys/create" class="row" style="margin:0;">
+          <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+          <label class="grow">
+            <div class="muted" style="font-size:0.8rem;">Label (optional)</div>
+            <input name="label" type="text" maxlength="255" placeholder="e.g. notifications-cron"
+                   style="width:100%; padding:0.55rem; border:1px solid #ccc; border-radius:6px; font:inherit;">
+          </label>
+          <button class="btn" type="submit">Create key</button>
+        </form>
+      </div>
+      <table>
+        <thead><tr><th>Label</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody>${listRows}</tbody>
+      </table>`;
+  })();
+
+  const usageBlock = missing ? '' : (() => {
+    const exampleBody = {
+      recipientEmail: 'someone@example.com',
+      subject: 'Hello from Gmail Sender',
+      body: 'Hi there,\n\nThis is a test.\n\n— sent via /send'
+    };
+    const exampleBodyJson = JSON.stringify(exampleBody, null, 2);
+    const curl =
+      `curl -X POST ${sendUrl} \\\n` +
+      `  -H "Authorization: Bearer gms_..." \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '${exampleBodyJson.replace(/'/g, `'\\''`)}'`;
+    return `
+      <h2>Sending mail</h2>
+      <p class="muted" style="margin: 0 0 0.4rem;">POST a JSON body to:</p>
+      <pre class="codeblock" style="user-select:all; margin: 0;">${esc(sendUrl)}</pre>
+      <p class="muted" style="margin: 0.4rem 0 1rem;">with your API key. Mail is sent as <code>${esc(email)}</code>.</p>
+      <div class="card">
+        <strong>Example request</strong>
+        <pre class="terminal">${esc(curl)}</pre>
+      </div>
+      <div class="card">
+        <strong>Body fields</strong>
+        <dl class="fields">
+          <dt><code>body</code><span class="req">required</span></dt>
+          <dd>Plain-text body (newlines preserved).</dd>
+          <dt><code>recipientEmail</code><span class="req">conditional</span></dt>
+          <dd>Required unless <code>threadId</code> is provided (in which case the reply-to address is read from the thread).</dd>
+          <dt><code>threadId</code><span class="req">optional</span></dt>
+          <dd>Gmail thread ID. If found, the message is sent as an in-thread reply with the right <code>In-Reply-To</code> / <code>References</code> headers.</dd>
+          <dt><code>subject</code><span class="req">optional</span></dt>
+          <dd>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</dd>
+          <dt><code>htmlBody</code><span class="req">optional</span></dt>
+          <dd>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</dd>
+        </dl>
+      </div>
+      <div class="card">
+        <strong>Success response</strong>
+        <pre class="codeblock">${esc(JSON.stringify({
+          status: 'ok',
+          mode: 'new',
+          threadId: '...',
+          messageId: '...',
+          to: '...',
+          subject: '...'
+        }, null, 2))}</pre>
+        <p class="muted" style="margin: 0.5rem 0 0;"><code>mode</code> is <code>"reply"</code> when the message went in-thread, <code>"new"</code> otherwise.</p>
+      </div>`;
+  })();
+
   return layout('Your account', `
     ${userHeader(email, csrfToken)}
     <h1>Your account</h1>
-    ${stateCard}
-    ${statsBlock}
-    ${errorBlock}
-    ${recentBlock}
+    ${missing ? stateCard : `
+      <div class="main-layout">
+        <section>
+          ${stateCard}
+          ${statsBlock}
+          <div class="two-col">
+            <section>${keysBlock}</section>
+            <section>${usageBlock}</section>
+          </div>
+          ${errorBlock}
+        </section>
+        <section>${recentBlock}</section>
+      </div>
+    `}
   `);
 }
 

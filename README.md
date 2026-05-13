@@ -18,9 +18,12 @@ sees their own dashboard, and can connect or disconnect their Gmail.
      with a single click.
    - **Remove account** — revokes the refresh token at Google and deletes
      the row. The user is signed out.
-3. A separate `POST /send` endpoint (protected by `API_KEY`) is what your
-   other services hit when they want to send mail through a connected
-   account.
+3. On the same dashboard the user creates one or more **API keys**, each
+   scoped to their account only. Your other services hit `POST /send` with
+   one of these keys to send mail. Each key is shown in plaintext once at
+   creation time; only an HMAC hash is stored, so a DB dump doesn't expose
+   live keys. The user can revoke any leaked key without affecting the
+   others.
 
 A user can only manage their own Gmail. There's no separate "connect" step —
 sign-in grants everything in one OAuth dance.
@@ -54,21 +57,26 @@ sign-in grants everything in one OAuth dance.
 | POST   | `/enable`             | session+CSRF  | Resume sending                                    |
 | POST   | `/remove`             | session+CSRF  | Revoke + delete + sign out                        |
 | POST   | `/logout`             | session+CSRF  | Clear the session cookie                          |
+| POST   | `/keys/create`        | session+CSRF  | Create a new API key for the signed-in user       |
+| POST   | `/keys/revoke`        | session+CSRF  | Revoke one of the signed-in user's API keys       |
 | GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view)          |
 | POST   | `/admin/unenroll`     | admin+CSRF    | Admin force-removes any account                   |
 | GET    | `/api/stats`          | admin         | JSON stats — all accounts or one                  |
-| POST   | `/send`               | API_KEY       | Send an email (reply in-thread or new)            |
+| POST   | `/send`               | user key      | Send an email (reply in-thread or new)            |
 
 ### Auth
 
 - **Session.** A signed cookie (`gms_session`, HttpOnly, Secure, SameSite=Lax,
   30-day TTL) tracks the signed-in user's email. Issued after a successful
   Google sign-in; verified via HMAC of `STATE_SECRET`.
-- **Admin.** `/admin/*` and `/api/stats` accept the `API_KEY` via HTTP Basic
-  auth (any username, password = `API_KEY`), or `Authorization: Bearer …`,
-  or `X-API-Key: …`.
-- **API_KEY.** `POST /send` requires the key in `Authorization: Bearer …` or
-  `X-API-Key: …`.
+- **Admin.** `/admin/*` and `/api/stats` accept either:
+  - HTTP **Basic** auth with `ADMIN_USER` / `ADMIN_PASS` env vars (browsers
+    prompt automatically), or
+  - `Authorization: Bearer <API_KEY>` / `X-API-Key: <API_KEY>` (for scripts).
+- **`POST /send`** requires a **per-user API key** (prefix `gms_…`) in
+  `Authorization: Bearer …` or `X-API-Key: …`. The key identifies which
+  Gmail account the caller can send as — there is no way to act as a
+  different account.
 
 
 ## Setup
@@ -117,7 +125,9 @@ The schema is auto-applied on first request via `CREATE TABLE IF NOT EXISTS`.
 
 | Variable                   | Description                                                                 |
 |----------------------------|-----------------------------------------------------------------------------|
-| `API_KEY`                  | Shared secret for `POST /send` and admin endpoints                          |
+| `API_KEY`                  | Shared secret for `POST /send` (also accepted on admin endpoints as Bearer / X-API-Key) |
+| `ADMIN_USER`               | Username for the admin login dialog at `/admin/*`                           |
+| `ADMIN_PASS`               | Password for the admin login dialog at `/admin/*`                           |
 | `STATE_SECRET`             | (optional) HMAC secret for session + OAuth state. Defaults to `API_KEY`.    |
 | `GMAIL_CLIENT_ID`          | OAuth2 Client ID                                                            |
 | `GMAIL_CLIENT_SECRET`      | OAuth2 Client Secret                                                        |
@@ -132,8 +142,11 @@ Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32`.
 
 ## `POST /send`
 
-Authentication: send `API_KEY` in `Authorization: Bearer <key>` or
-`X-API-Key: <key>`. Missing or wrong key → `401`.
+Authentication: send a per-user API key (created from the dashboard, shaped
+`gms_<48 hex chars>`) in either `Authorization: Bearer <key>` or
+`X-API-Key: <key>`. The key identifies which Gmail account the call will
+send as — there is no way to override that from the request. Missing or
+wrong key → `401`.
 
 If `threadId` matches a real Gmail thread on the account, the service
 replies in-thread; otherwise sends a brand-new email to `recipientEmail`.
@@ -142,7 +155,6 @@ Request body:
 
 ```json
 {
-  "accountEmail":   "inbox@yourdomain.com",
   "body":           "The plain-text body",
   "htmlBody":       "<p>The HTML body</p>",
   "recipientEmail": "patient@example.com",
@@ -153,7 +165,6 @@ Request body:
 
 | Field            | Required? | Notes                                                           |
 |------------------|-----------|-----------------------------------------------------------------|
-| `accountEmail`   | yes       | Which Gmail account to send from (must be connected via the UI) |
 | `body`           | yes       | Plain-text body (newlines preserved)                            |
 | `htmlBody`       | no        | HTML body. If omitted, auto-generated from `body`               |
 | `recipientEmail` | see notes | Required if no `threadId`. Overrides the auto-detected reply-to |
@@ -185,6 +196,18 @@ CREATE TABLE accounts (
   total_sends    BIGINT       NOT NULL DEFAULT 0
 );
 
+CREATE TABLE api_keys (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  account_email  VARCHAR(255) NOT NULL,
+  label          VARCHAR(255) NULL,
+  hash           CHAR(64)     NOT NULL,         -- HMAC of the plaintext key
+  last4          VARCHAR(4)   NOT NULL,         -- displayed in the UI
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at   DATETIME     NULL,
+  UNIQUE KEY uniq_hash (hash),
+  INDEX idx_account (account_email)
+);
+
 CREATE TABLE send_logs (
   id             BIGINT AUTO_INCREMENT PRIMARY KEY,
   account_email  VARCHAR(255) NOT NULL,
@@ -213,13 +236,11 @@ drop the env var and redeploy.
 
 ```js
 const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app';
-const API_KEY          = 'YOUR_API_KEY';
-const FROM_ACCOUNT     = 'inbox@yourdomain.com';
+const API_KEY          = 'gms_...';                  // your per-user API key
 const TO_ADDRESS       = 'you@yourdomain.com';
 
 function runTest() {
   const r = post({
-    accountEmail:   FROM_ACCOUNT,
     recipientEmail: TO_ADDRESS,
     subject:        'Hello from Gmail Sender',
     body:           'Hello, world!\n\n— ' + new Date().toISOString()
