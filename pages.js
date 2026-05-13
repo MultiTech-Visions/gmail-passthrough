@@ -109,7 +109,7 @@ function fmtDate(d) {
 // exists — there's no separate "connect" step. `summary` is null only in
 // the unusual case where the cookie outlived the DB row (e.g. the account
 // was removed via /admin/unenroll); in that case we show a re-sign-in card.
-function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null }) {
+function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null, sendUrl = '' }) {
   const missing = !summary;
   const disabled = !!(summary && summary.disabled);
 
@@ -243,12 +243,56 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       </table>`;
   })();
 
+  const usageBlock = missing ? '' : (() => {
+    const exampleBody = {
+      recipientEmail: 'someone@example.com',
+      subject: 'Hello from Gmail Sender',
+      body: 'Hi there,\n\nThis is a test.\n\n— sent via /send'
+    };
+    const exampleBodyJson = JSON.stringify(exampleBody, null, 2);
+    const curl =
+      `curl -X POST ${sendUrl} \\\n` +
+      `  -H "Authorization: Bearer gms_..." \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '${exampleBodyJson.replace(/'/g, `'\\''`)}'`;
+    return `
+      <h2>Sending mail</h2>
+      <p class="muted" style="margin-top:0;">
+        POST a JSON body to <code>${esc(sendUrl)}</code> with your API key.
+        Mail is sent as <code>${esc(email)}</code>.
+      </p>
+      <div class="card">
+        <strong>Example request</strong>
+        <pre style="background:#0b1020; color:#e6e6e6; padding:0.75rem; border-radius:6px; overflow:auto; margin:0.5rem 0 0; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;"><code>${esc(curl)}</code></pre>
+      </div>
+      <div class="card">
+        <strong>Body fields</strong>
+        <table style="margin-top:0.5rem;">
+          <thead><tr><th>Field</th><th>Required?</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>body</code></td><td>yes</td><td>Plain-text body (newlines preserved)</td></tr>
+            <tr><td><code>recipientEmail</code></td><td>see notes</td><td>Required unless <code>threadId</code> is provided (in which case the reply-to address is read from the thread).</td></tr>
+            <tr><td><code>threadId</code></td><td>no</td><td>Gmail thread ID. If found, the message is sent as an in-thread reply with the right <code>In-Reply-To</code> / <code>References</code> headers.</td></tr>
+            <tr><td><code>subject</code></td><td>no</td><td>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</td></tr>
+            <tr><td><code>htmlBody</code></td><td>no</td><td>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</td></tr>
+            <tr><td><code>accountEmail</code></td><td>no</td><td>Optional when using a per-user API key (the key already binds the call to <code>${esc(email)}</code>). If you do include it, it must match.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <strong>Success response</strong>
+        <pre style="background:#f4f4f4; padding:0.75rem; border-radius:6px; overflow:auto; margin:0.5rem 0 0; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;"><code>${esc('{ "status": "ok", "mode": "new", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }')}</code></pre>
+        <p class="muted" style="margin: 0.5rem 0 0;"><code>mode</code> is <code>"reply"</code> when the message went in-thread, <code>"new"</code> otherwise.</p>
+      </div>`;
+  })();
+
   return layout('Your account', `
     ${userHeader(email, csrfToken)}
     <h1>Your account</h1>
     ${stateCard}
     ${statsBlock}
     ${keysBlock}
+    ${usageBlock}
     ${errorBlock}
     ${recentBlock}
   `);

@@ -314,12 +314,25 @@ async function renderUserDashboard(req, res, email, opts = {}) {
       recent,
       errors,
       keys,
-      newKey: opts.newKey || null
+      newKey: opts.newKey || null,
+      sendUrl: getSendUrl(req)
     }));
   } catch (e) {
     log("Error", `User dashboard failed for ${email}: ${e.message}`);
     res.status(500).type('html').send(pages.errorPage(`Could not load your account: ${e.message}`, { signedIn: true }));
   }
+}
+
+// Best-effort full URL for /send: prefer OAUTH_REDIRECT_URI's origin (already
+// configured and accurate), fall back to the inbound request's host.
+function getSendUrl(req) {
+  const redirect = process.env.OAUTH_REDIRECT_URI;
+  if (redirect) {
+    try { return new URL('/send', redirect).toString(); } catch { /* fall through */ }
+  }
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+  const host = req.get('host') || 'YOUR-HOST';
+  return `${proto}://${host}/send`;
 }
 
 
