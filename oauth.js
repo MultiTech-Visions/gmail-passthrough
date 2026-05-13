@@ -9,6 +9,7 @@ const SCOPES = [
 ];
 
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const VALID_ACTIONS = new Set(['enroll', 'unenroll-self']);
 
 function getStateSecret() {
   const secret = process.env.STATE_SECRET || process.env.API_KEY;
@@ -89,11 +90,30 @@ async function revokeToken(refreshToken) {
   return resp.ok;
 }
 
+// HMAC of a fixed string with STATE_SECRET. Embedded in admin forms to defend
+// against CSRF: a cross-origin page can't read the dashboard HTML to lift this
+// value, but a logged-in admin's browser will submit it correctly.
+function getAdminCsrfToken() {
+  return crypto.createHmac('sha256', getStateSecret()).update('admin-csrf').digest('hex');
+}
+
+function verifyAdminCsrfToken(token) {
+  if (!token || typeof token !== 'string') return false;
+  const expected = getAdminCsrfToken();
+  const a = Buffer.from(token);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 module.exports = {
   signState,
   verifyState,
   buildAuthUrl,
   exchangeCode,
   revokeToken,
-  getRedirectUri
+  getRedirectUri,
+  getAdminCsrfToken,
+  verifyAdminCsrfToken,
+  VALID_ACTIONS
 };

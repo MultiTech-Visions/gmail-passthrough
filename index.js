@@ -4,7 +4,10 @@ const { getGmailService, invalidateAuthCache } = require('./google-auth.js');
 const { sendEmail } = require('./sender.js');
 const { log } = require('./helpers.js');
 const { getAccount, listAccounts, upsertAccount, deleteAccount, recordSend } = require('./db.js');
-const { signState, verifyState, buildAuthUrl, exchangeCode, revokeToken } = require('./oauth.js');
+const {
+  signState, verifyState, buildAuthUrl, exchangeCode, revokeToken,
+  getAdminCsrfToken, verifyAdminCsrfToken
+} = require('./oauth.js');
 const { getAccountStats, getRecentSends, getErrorBreakdown } = require('./stats.js');
 const pages = require('./pages.js');
 
@@ -19,18 +22,32 @@ functions.http('gmailSender', async (req, res) => {
       return res.status(200).send('OK');
     }
 
-    // Self-serve pages — public (OAuth itself proves account ownership)
+    // ---- Public routes (self-serve) -----------------------------------------
     if (method === 'GET' && path === '/enroll')           return handleEnrollLanding(req, res);
     if (method === 'GET' && path === '/oauth/start')      return handleOAuthStart(req, res);
     if (method === 'GET' && path === '/oauth/callback')   return handleOAuthCallback(req, res);
-    if (method === 'GET' && path === '/accounts')         return handleAccountsDashboard(req, res);
-    if (method === 'GET' && path === '/account')          return handleAccountDetail(req, res);
-    if (method === 'GET' && path === '/unenroll/start')   return handleUnenrollStart(req, res);
-    if (method === 'GET' && path === '/api/stats')        return handleApiStats(req, res);
 
-    // API endpoints — require shared-secret API_KEY
+    // ---- Admin-only routes --------------------------------------------------
+    if (method === 'GET' && path === '/accounts') {
+      if (!requireAdmin(req, res)) return;
+      return handleAccountsDashboard(req, res);
+    }
+    if (method === 'GET' && path === '/account') {
+      if (!requireAdmin(req, res)) return;
+      return handleAccountDetail(req, res);
+    }
+    if (method === 'GET' && path === '/api/stats') {
+      if (!requireAdmin(req, res)) return;
+      return handleApiStats(req, res);
+    }
+    if (method === 'POST' && path === '/admin/unenroll') {
+      if (!requireAdmin(req, res)) return;
+      return handleAdminUnenroll(req, res);
+    }
+
+    // ---- /send (existing API_KEY) ------------------------------------------
     if (path === '/send') {
-      if (!isAuthorized(req)) return res.status(401).json({ error: "Unauthorized" });
+      if (!isApiKeyAuthorized(req)) return res.status(401).json({ error: "Unauthorized" });
       return handleSend(req, res);
     }
 
@@ -42,7 +59,17 @@ functions.http('gmailSender', async (req, res) => {
 });
 
 
-function isAuthorized(req) {
+// ---- Auth -------------------------------------------------------------------
+
+function timingSafeEqStr(a, b) {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+// `Authorization: Bearer <key>` or `X-API-Key: <key>`. Used by /send.
+function isApiKeyAuthorized(req) {
   const expected = process.env.API_KEY;
   if (!expected) {
     log("Error", "API_KEY env var not set — rejecting request.");
@@ -52,41 +79,62 @@ function isAuthorized(req) {
   const bearer = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
   const provided = bearer || req.get('x-api-key') || '';
   if (!provided) return false;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  return timingSafeEqStr(provided, expected);
+}
+
+// Admin auth accepts API_KEY via Bearer / X-API-Key (for scripts) OR HTTP Basic
+// auth (so a browser prompts the user for credentials when they visit the
+// dashboard). On failure, sets WWW-Authenticate so the browser shows the login
+// dialog. Returns true if authorized; on false the response has been sent and
+// the caller should stop processing.
+function requireAdmin(req, res) {
+  const expected = process.env.API_KEY;
+  if (!expected) {
+    log("Error", "API_KEY env var not set — rejecting admin request.");
+    res.status(500).json({ error: "Server misconfigured: API_KEY not set" });
+    return false;
+  }
+
+  if (isApiKeyAuthorized(req)) return true;
+
+  const header = req.get('authorization') || '';
+  if (header.startsWith('Basic ')) {
+    const decoded = Buffer.from(header.slice('Basic '.length), 'base64').toString('utf-8');
+    const idx = decoded.indexOf(':');
+    const pass = idx >= 0 ? decoded.slice(idx + 1) : decoded;
+    if (pass && timingSafeEqStr(pass, expected)) return true;
+  }
+
+  res.set('WWW-Authenticate', 'Basic realm="Gmail Sender Admin", charset="UTF-8"');
+  res.status(401).type('text/plain').send('Authentication required.');
+  return false;
 }
 
 
-// ---- /enroll landing -------------------------------------------------------
+// ---- /enroll landing --------------------------------------------------------
 
 function handleEnrollLanding(req, res) {
   res.status(200).type('html').send(pages.landingPage());
 }
 
 
-// ---- OAuth start -----------------------------------------------------------
-// GET /oauth/start?action=enroll               (action defaults to enroll)
-// GET /oauth/start?action=unenroll&email=...   (used by the unenroll flow)
+// ---- OAuth start ------------------------------------------------------------
+// GET /oauth/start?action=enroll
+// GET /oauth/start?action=unenroll-self
 //
-// Builds a signed state token, then redirects the browser to Google's consent
-// screen. The state token is verified on the callback so neither the action
-// nor the target email can be tampered with.
+// `enroll` and `unenroll-self` are the only valid actions. Both are public:
+// `enroll` upserts whatever account Google authenticates as, and
+// `unenroll-self` removes whatever account Google authenticates as. Neither
+// lets the caller act on someone else's account.
 
 function handleOAuthStart(req, res) {
   const action = (req.query.action || 'enroll').toString();
-  if (action !== 'enroll' && action !== 'unenroll') {
+  if (action !== 'enroll' && action !== 'unenroll-self') {
     return res.status(400).type('html').send(pages.errorPage(`Unknown action: ${action}`));
   }
 
-  const target = req.query.email ? req.query.email.toString().toLowerCase() : undefined;
-  if (action === 'unenroll' && !target) {
-    return res.status(400).type('html').send(pages.errorPage('Missing email for unenroll.'));
-  }
-
   try {
-    const state = signState({ action, target });
+    const state = signState({ action });
     const url = buildAuthUrl(state);
     return res.redirect(302, url);
   } catch (e) {
@@ -96,21 +144,7 @@ function handleOAuthStart(req, res) {
 }
 
 
-function handleUnenrollStart(req, res) {
-  const email = (req.query.email || '').toString().toLowerCase();
-  if (!email) {
-    return res.status(400).type('html').send(pages.errorPage('Missing email.'));
-  }
-  // Redirect through the same OAuth start handler so the flow is identical.
-  return res.redirect(302, `/oauth/start?action=unenroll&email=${encodeURIComponent(email)}`);
-}
-
-
-// ---- OAuth callback --------------------------------------------------------
-// GET /oauth/callback?code=...&state=...
-// On enroll: upsert refresh token into accounts table.
-// On unenroll: only succeed if Google's profile email matches the target, then
-//              revoke the refresh token at Google and delete the row.
+// ---- OAuth callback ---------------------------------------------------------
 
 async function handleOAuthCallback(req, res) {
   const code = req.query.code ? req.query.code.toString() : '';
@@ -153,13 +187,7 @@ async function handleOAuthCallback(req, res) {
     }
   }
 
-  if (state.action === 'unenroll') {
-    if (!state.target || state.target !== email) {
-      return res.status(403).type('html').send(pages.errorPage(
-        `You signed in as ${email}, but the unenroll request was for ${state.target}. ` +
-        `Sign in with that account to unenroll it.`
-      ));
-    }
+  if (state.action === 'unenroll-self') {
     try {
       const existing = await getAccount(email);
       if (existing) {
@@ -167,14 +195,16 @@ async function handleOAuthCallback(req, res) {
         if (!ok) log("Info", `Token revoke for ${email} returned non-OK; deleting row anyway.`);
         await deleteAccount(email);
         invalidateAuthCache(email);
-        log("Info", `Unenrolled account ${email}`);
+        log("Info", `Self-unenrolled account ${email}`);
+      } else {
+        log("Info", `Self-unenroll: ${email} was not enrolled.`);
       }
-      // Also revoke whatever token we just got back from this flow, so the
+      // Also revoke the brand-new refresh token we just received, so the
       // grant we just created doesn't linger on Google's side.
       await revokeToken(refreshToken).catch(() => {});
       return res.status(200).type('html').send(pages.unenrollSuccessPage(email));
     } catch (e) {
-      log("Error", `Unenroll failed for ${email}: ${e.message}`);
+      log("Error", `Self-unenroll failed for ${email}: ${e.message}`);
       return res.status(500).type('html').send(pages.errorPage(`Could not unenroll: ${e.message}`));
     }
   }
@@ -183,12 +213,47 @@ async function handleOAuthCallback(req, res) {
 }
 
 
-// ---- Dashboard -------------------------------------------------------------
+// ---- Admin: direct unenroll (POST /admin/unenroll) -------------------------
+// Admin is already authenticated; we just need to defend against CSRF. The
+// hidden `csrf` form field is an HMAC of STATE_SECRET — a cross-origin page
+// can't read the dashboard HTML to lift it.
+
+async function handleAdminUnenroll(req, res) {
+  const body = req.body || {};
+  const email = (body.email || '').toString().toLowerCase();
+  const csrf  = (body.csrf  || '').toString();
+
+  if (!email) {
+    return res.status(400).type('html').send(pages.errorPage('Missing email.'));
+  }
+  if (!verifyAdminCsrfToken(csrf)) {
+    return res.status(403).type('html').send(pages.errorPage('Invalid CSRF token. Reload the dashboard and try again.'));
+  }
+
+  try {
+    const existing = await getAccount(email);
+    if (!existing) {
+      return res.status(404).type('html').send(pages.errorPage(`No such account: ${email}`));
+    }
+    const ok = await revokeToken(existing.refresh_token);
+    if (!ok) log("Info", `Token revoke for ${email} returned non-OK; deleting row anyway.`);
+    await deleteAccount(email);
+    invalidateAuthCache(email);
+    log("Info", `Admin-unenrolled account ${email}`);
+    return res.status(200).type('html').send(pages.unenrollSuccessPage(email));
+  } catch (e) {
+    log("Error", `Admin unenroll failed for ${email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not unenroll: ${e.message}`));
+  }
+}
+
+
+// ---- Admin dashboard --------------------------------------------------------
 
 async function handleAccountsDashboard(req, res) {
   try {
     const stats = await getAccountStats();
-    res.status(200).type('html').send(pages.accountsDashboard(stats));
+    res.status(200).type('html').send(pages.accountsDashboard(stats, getAdminCsrfToken()));
   } catch (e) {
     log("Error", `Dashboard failed: ${e.message}`);
     res.status(500).type('html').send(pages.errorPage(`Could not load accounts: ${e.message}`));
@@ -210,7 +275,7 @@ async function handleAccountDetail(req, res) {
       getRecentSends(email, 50),
       getErrorBreakdown(email, 30)
     ]);
-    res.status(200).type('html').send(pages.accountDetailPage(email, summary, recent, errors));
+    res.status(200).type('html').send(pages.accountDetailPage(email, summary, recent, errors, getAdminCsrfToken()));
   } catch (e) {
     log("Error", `Account detail failed for ${email}: ${e.message}`);
     res.status(500).type('html').send(pages.errorPage(`Could not load account: ${e.message}`));
@@ -218,9 +283,7 @@ async function handleAccountDetail(req, res) {
 }
 
 
-// ---- Stats API -------------------------------------------------------------
-// GET /api/stats                — totals for all accounts
-// GET /api/stats?email=...      — totals + recent + error breakdown for one
+// ---- Stats API (admin-only) -------------------------------------------------
 
 async function handleApiStats(req, res) {
   const email = req.query.email ? req.query.email.toString().toLowerCase() : '';
@@ -243,9 +306,7 @@ async function handleApiStats(req, res) {
 }
 
 
-// ---- /send -----------------------------------------------------------------
-// Same shape as before, but tokens come from the DB (with env-var fallback) and
-// every attempt is logged to send_logs.
+// ---- /send ------------------------------------------------------------------
 
 async function handleSend(req, res) {
   const body = req.body || {};

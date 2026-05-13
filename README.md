@@ -25,20 +25,31 @@ enrollment**, an enrolled-accounts dashboard, and per-account send stats.
 | Method | Path                | Auth     | Description                                  |
 |--------|---------------------|----------|----------------------------------------------|
 | GET    | `/`                 | none     | Health check                                 |
-| GET    | `/enroll`           | none     | Landing page — "Connect a Gmail account"     |
+| GET    | `/enroll`           | none     | Landing page — "Connect" / "Disconnect"      |
 | GET    | `/oauth/start`      | none     | Begins Google OAuth flow                     |
 | GET    | `/oauth/callback`   | none     | Google redirects here with the auth code     |
-| GET    | `/accounts`         | none     | Dashboard listing every enrolled account     |
-| GET    | `/account?email=…`  | none     | Detail view for one account                  |
-| GET    | `/unenroll/start`   | none     | Begins the unenroll flow (re-auth as user)   |
-| GET    | `/api/stats`        | none     | JSON stats — all accounts or one             |
+| GET    | `/accounts`         | admin    | Dashboard listing every enrolled account     |
+| GET    | `/account?email=…`  | admin    | Detail view for one account                  |
+| GET    | `/api/stats`        | admin    | JSON stats — all accounts or one             |
+| POST   | `/admin/unenroll`   | admin    | Admin removes an account (revokes + deletes) |
 | POST   | `/send`             | API_KEY  | Send an email (reply in-thread or new)       |
 
-The enrollment / dashboard pages are intentionally unauthenticated: Google's
-own OAuth flow guarantees the enroller owns the Gmail account they're
-connecting, and an unenroll only succeeds when the signed-in Google account
-matches the account being removed. If you want to lock down the dashboard,
-put the service behind Cloud Run IAM or IAP.
+### Auth
+
+- **API_KEY** routes (`/send`): send the key in `Authorization: Bearer <key>`
+  or `X-API-Key: <key>`.
+- **Admin** routes (the dashboard, account detail, stats API, admin unenroll):
+  protected by the same shared secret as `API_KEY`. Three accepted forms:
+  - HTTP **Basic** auth (browsers will prompt automatically): any username,
+    password = `API_KEY`.
+  - `Authorization: Bearer <API_KEY>`
+  - `X-API-Key: <API_KEY>`
+
+The **enrollment** flow (`/enroll`, `/oauth/*`) is intentionally public —
+Google's OAuth flow guarantees that whoever clicks "Connect" can only
+enroll a Gmail account they own. The same is true of the self-serve
+"Disconnect my account" button: it removes whatever account Google
+authenticates them as, and nothing else.
 
 
 ## Setup
@@ -130,10 +141,15 @@ token.
 
 ## Unenrolling
 
-From `/accounts`, click **Unenroll** next to the row. The user is sent
-through Google sign-in; the service only proceeds if Google reports back the
-same email address. On success the refresh token is revoked at Google's
-`/revoke` endpoint and the row is deleted.
+There are two paths, depending on who's doing it:
+
+- **Self-serve.** Send the user to `/enroll` and have them click **Disconnect
+  my account**. They sign in with Google, and the service removes whichever
+  account Google authenticates them as — they can only remove their own.
+- **Admin.** From `/accounts`, click **Unenroll** next to the row. The
+  service revokes the refresh token at Google's `/revoke` endpoint and
+  deletes the row. No OAuth round-trip required (admin already proved
+  identity by signing in to the dashboard).
 
 
 ## Stats

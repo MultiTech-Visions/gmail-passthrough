@@ -70,9 +70,12 @@ ${bodyHtml}
 function landingPage() {
   return layout('Gmail Sender — Enroll', `
     <h1>Gmail Sender</h1>
-    <p class="sub">Connect a Gmail account so this service can send mail on its behalf.</p>
-    <p><a class="btn" href="/oauth/start?action=enroll">Connect a Gmail account</a></p>
-    <p><a href="/accounts">View enrolled accounts &rarr;</a></p>
+    <p class="sub">Connect a Gmail account so this service can send mail on its behalf, or disconnect an account you previously enrolled.</p>
+    <p>
+      <a class="btn" href="/oauth/start?action=enroll">Connect a Gmail account</a>
+      <a class="btn secondary" href="/oauth/start?action=unenroll-self">Disconnect my account</a>
+    </p>
+    <p class="muted">Disconnecting signs you in with Google so we know exactly which account to remove — you can only disconnect your own.</p>
   `);
 }
 
@@ -107,9 +110,9 @@ function fmtDate(d) {
   return `<span title="${esc(date.toISOString())}">${esc(date.toISOString().replace('T', ' ').slice(0, 16))} UTC</span>`;
 }
 
-function accountsDashboard(stats) {
+function accountsDashboard(stats, csrfToken) {
   const rows = stats.length === 0
-    ? `<tr><td colspan="7"><div class="empty">No accounts enrolled yet. <a href="/enroll">Enroll one &rarr;</a></div></td></tr>`
+    ? `<tr><td colspan="8"><div class="empty">No accounts enrolled yet. <a href="/enroll">Enroll one &rarr;</a></div></td></tr>`
     : stats.map((s) => `
         <tr>
           <td><code>${esc(s.email)}</code></td>
@@ -121,8 +124,12 @@ function accountsDashboard(stats) {
           <td>${fmtDate(s.lastUsedAt)}</td>
           <td>
             <a class="btn secondary" href="/account?email=${encodeURIComponent(s.email)}">Details</a>
-            <a class="btn danger" href="/unenroll/start?email=${encodeURIComponent(s.email)}"
-               onclick="return confirm('Unenroll ${esc(s.email)}? You will need to sign in with that Google account to confirm.')">Unenroll</a>
+            <form method="POST" action="/admin/unenroll" style="display:inline"
+                  onsubmit="return confirm('Unenroll ${esc(s.email)}? This revokes the refresh token at Google and deletes the row.');">
+              <input type="hidden" name="email" value="${esc(s.email)}">
+              <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+              <button class="btn danger" type="submit">Unenroll</button>
+            </form>
           </td>
         </tr>
       `).join('');
@@ -151,7 +158,7 @@ function accountsDashboard(stats) {
   `);
 }
 
-function accountDetailPage(email, summary, recent, errors) {
+function accountDetailPage(email, summary, recent, errors, csrfToken) {
   const recentRows = recent.length === 0
     ? `<tr><td colspan="5"><div class="empty">No sends recorded yet.</div></td></tr>`
     : recent.map((r) => `
@@ -206,10 +213,12 @@ function accountDetailPage(email, summary, recent, errors) {
       <tbody>${recentRows}</tbody>
     </table>
 
-    <p>
-      <a class="btn danger" href="/unenroll/start?email=${encodeURIComponent(email)}"
-         onclick="return confirm('Unenroll ${esc(email)}?')">Unenroll this account</a>
-    </p>
+    <form method="POST" action="/admin/unenroll"
+          onsubmit="return confirm('Unenroll ${esc(email)}?');">
+      <input type="hidden" name="email" value="${esc(email)}">
+      <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+      <button class="btn danger" type="submit">Unenroll this account</button>
+    </form>
   `);
 }
 
