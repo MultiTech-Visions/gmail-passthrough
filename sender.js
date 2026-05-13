@@ -8,7 +8,7 @@ const { log } = require('./helpers.js');
 // text/html part. If htmlBody is omitted, an HTML part is auto-generated from
 // body (HTML-escaped, newlines -> <br>).
 
-async function sendEmail({ gmail, threadId, recipientEmail, subject, body, htmlBody }) {
+async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body, htmlBody }) {
   if (!body) {
     throw new Error("Missing required field: body");
   }
@@ -20,7 +20,7 @@ async function sendEmail({ gmail, threadId, recipientEmail, subject, body, htmlB
         userId: 'me',
         id: threadId,
         format: 'metadata',
-        metadataHeaders: ['From', 'To', 'Subject', 'Message-ID', 'References']
+        metadataHeaders: ['From', 'To', 'Reply-To', 'Subject', 'Message-ID', 'References']
       });
       thread = resp.data;
     } catch (e) {
@@ -33,7 +33,7 @@ async function sendEmail({ gmail, threadId, recipientEmail, subject, body, htmlB
   }
 
   if (thread && thread.messages && thread.messages.length > 0) {
-    return await replyToThread({ gmail, thread, recipientEmail, subject, body, htmlBody });
+    return await replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody });
   }
 
   if (!recipientEmail) {
@@ -44,7 +44,16 @@ async function sendEmail({ gmail, threadId, recipientEmail, subject, body, htmlB
 }
 
 
-async function replyToThread({ gmail, thread, recipientEmail, subject, body, htmlBody }) {
+// Pulls the first email address out of an RFC 2822 address header, which can
+// be `"Name" <addr@host>`, `addr@host`, or a comma-separated list.
+function parseFirstAddress(header) {
+  if (!header) return '';
+  const angle = header.match(/<([^>]+)>/);
+  if (angle) return angle[1].trim();
+  return header.split(',')[0].trim();
+}
+
+async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody }) {
   const lastMessage = thread.messages[thread.messages.length - 1];
   const headers = lastMessage.payload.headers;
 
@@ -56,12 +65,24 @@ async function replyToThread({ gmail, thread, recipientEmail, subject, body, htm
   const originalSubject = getHeader('Subject');
   const originalMessageId = getHeader('Message-ID');
   const originalReferences = getHeader('References');
-  const fromHeader = getHeader('From');
 
   let to = recipientEmail;
   if (!to) {
-    const match = fromHeader.match(/<(.+?)>/);
-    to = match ? match[1] : fromHeader;
+    // Prefer Reply-To, fall back to From. If that address is the authenticated
+    // account itself (i.e. we sent the last message in the thread), reply to
+    // the original recipient instead — otherwise we'd just email ourselves.
+    const replyToHeader = getHeader('Reply-To');
+    const fromHeader    = getHeader('From');
+    const target = parseFirstAddress(replyToHeader || fromHeader);
+    if (target && accountEmail && target.toLowerCase() === accountEmail.toLowerCase()) {
+      to = parseFirstAddress(getHeader('To'));
+    } else {
+      to = target;
+    }
+  }
+
+  if (!to) {
+    throw new Error("Could not determine reply-to address from the thread; pass recipientEmail explicitly.");
   }
 
   const replySubject = subject

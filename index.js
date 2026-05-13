@@ -455,7 +455,7 @@ async function handleSend(req, res) {
   }
 
   try {
-    const result = await sendEmail({ gmail, threadId, recipientEmail, subject, body: emailBody, htmlBody });
+    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, htmlBody });
     await recordSend({
       accountEmail,
       recipient: result.to,
