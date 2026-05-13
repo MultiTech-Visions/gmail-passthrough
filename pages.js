@@ -288,10 +288,9 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       `  -d '${exampleBodyJson.replace(/'/g, `'\\''`)}'`;
     return `
       <h2>Sending mail</h2>
-      <p class="muted" style="margin-top:0;">
-        POST a JSON body to <code>${esc(sendUrl)}</code> with your API key.
-        Mail is sent as <code>${esc(email)}</code>.
-      </p>
+      <p class="muted" style="margin: 0 0 0.4rem;">POST a JSON body to:</p>
+      <pre class="codeblock" style="user-select:all; margin: 0;">${esc(sendUrl)}</pre>
+      <p class="muted" style="margin: 0.4rem 0 1rem;">with your API key. Mail is sent as <code>${esc(email)}</code>.</p>
       <div class="card">
         <strong>Example request</strong>
         <pre class="terminal">${esc(curl)}</pre>
