@@ -232,7 +232,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       <div class="card" style="border-color:#f0a500; background: #fff8e1;">
         <strong>Copy this key now — it won't be shown again.</strong>
         ${newKey.label ? `<div class="muted">Label: ${esc(newKey.label)}</div>` : ''}
-        <pre class="codeblock" style="user-select:all;"><code>${esc(newKey.plaintext)}</code></pre>
+        <pre class="codeblock" style="user-select:all;">${esc(newKey.plaintext)}</pre>
       </div>` : '';
 
     const listRows = keys.length === 0
@@ -294,7 +294,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       </p>
       <div class="card">
         <strong>Example request</strong>
-        <pre class="terminal"><code>${esc(curl)}</code></pre>
+        <pre class="terminal">${esc(curl)}</pre>
       </div>
       <div class="card">
         <strong>Body fields</strong>
@@ -313,7 +313,14 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
       </div>
       <div class="card">
         <strong>Success response</strong>
-        <pre class="codeblock"><code>${esc('{ "status": "ok", "mode": "new", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }')}</code></pre>
+        <pre class="codeblock">${esc(JSON.stringify({
+          status: 'ok',
+          mode: 'new',
+          threadId: '...',
+          messageId: '...',
+          to: '...',
+          subject: '...'
+        }, null, 2))}</pre>
         <p class="muted" style="margin: 0.5rem 0 0;"><code>mode</code> is <code>"reply"</code> when the message went in-thread, <code>"new"</code> otherwise.</p>
       </div>`;
   })();
