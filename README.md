@@ -7,20 +7,23 @@ sees their own dashboard, and can connect or disconnect their Gmail.
 
 ## How it works
 
-1. A user visits the site, clicks **Sign in with Google**, and authenticates.
-2. They land on their own dashboard. If they haven't granted send permission
-   yet, they click **Connect** to do so. (Google's consent screen appears,
-   they grant `gmail.send` + `gmail.modify`, and Google returns a refresh
-   token, which is saved to the database keyed by their email.)
-3. From the same dashboard, they can see their send stats and click
-   **Disconnect** at any time to revoke access.
-4. A separate `POST /send` endpoint (protected by a shared API key) is what
-   your other services hit when they want to send mail through a connected
+1. A user visits the site and clicks **Sign in with Google**. The single
+   OAuth flow requests both identity scopes (`openid`, `email`, `profile`)
+   and send scopes (`gmail.send`, `gmail.modify`) at once. Google returns
+   both an id_token (for identifying the user) and a refresh_token (saved
+   to the database for sending).
+2. They land on their own dashboard with full stats and two controls:
+   - **Pause sending** — sets a `disabled` flag. The refresh token is kept,
+     but `/send` refuses to use the account. The user can resume any time
+     with a single click.
+   - **Remove account** — revokes the refresh token at Google and deletes
+     the row. The user is signed out.
+3. A separate `POST /send` endpoint (protected by `API_KEY`) is what your
+   other services hit when they want to send mail through a connected
    account.
 
-A user can only connect / disconnect their own Gmail. The Google sign-in
-identifies them; the connect flow verifies the granted account matches the
-signed-in account.
+A user can only manage their own Gmail. There's no separate "connect" step —
+sign-in grants everything in one OAuth dance.
 
 
 ## Files
@@ -40,20 +43,21 @@ signed-in account.
 
 ## Routes
 
-| Method | Path                  | Auth          | Description                              |
-|--------|-----------------------|---------------|------------------------------------------|
-| GET    | `/healthz`            | none          | Health check                             |
-| GET    | `/`                   | none          | Login page (if signed out) or dashboard  |
-| GET    | `/login`              | none          | "Sign in with Google" page               |
-| GET    | `/login/start`        | none          | Begins Google sign-in flow               |
-| GET    | `/connect/start`      | session       | Begins Gmail-scope grant for current user|
-| GET    | `/oauth/callback`     | none          | Google redirects here with auth code     |
-| POST   | `/disconnect`         | session+CSRF  | Revoke + delete the current user's Gmail |
-| POST   | `/logout`             | session+CSRF  | Clear the session cookie                 |
-| GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view) |
-| POST   | `/admin/unenroll`     | admin+CSRF    | Admin removes any account                |
-| GET    | `/api/stats`          | admin         | JSON stats — all accounts or one         |
-| POST   | `/send`               | API_KEY       | Send an email (reply in-thread or new)   |
+| Method | Path                  | Auth          | Description                                       |
+|--------|-----------------------|---------------|---------------------------------------------------|
+| GET    | `/healthz`            | none          | Health check                                      |
+| GET    | `/`                   | none          | Login page (if signed out) or dashboard           |
+| GET    | `/login`              | none          | "Sign in with Google" page                        |
+| GET    | `/login/start`        | none          | Begins the single Google OAuth flow               |
+| GET    | `/oauth/callback`     | none          | Google redirects here; sets session + saves token |
+| POST   | `/disable`            | session+CSRF  | Pause sending (keeps the refresh token)           |
+| POST   | `/enable`             | session+CSRF  | Resume sending                                    |
+| POST   | `/remove`             | session+CSRF  | Revoke + delete + sign out                        |
+| POST   | `/logout`             | session+CSRF  | Clear the session cookie                          |
+| GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view)          |
+| POST   | `/admin/unenroll`     | admin+CSRF    | Admin force-removes any account                   |
+| GET    | `/api/stats`          | admin         | JSON stats — all accounts or one                  |
+| POST   | `/send`               | API_KEY       | Send an email (reply in-thread or new)            |
 
 ### Auth
 
@@ -175,6 +179,7 @@ Success response:
 CREATE TABLE accounts (
   email          VARCHAR(255) PRIMARY KEY,
   refresh_token  TEXT         NOT NULL,
+  disabled       BOOLEAN      NOT NULL DEFAULT FALSE,
   enrolled_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_used_at   DATETIME     NULL,
   total_sends    BIGINT       NOT NULL DEFAULT 0

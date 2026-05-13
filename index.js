@@ -3,11 +3,8 @@ const functions = require('@google-cloud/functions-framework');
 const { getGmailService, invalidateAuthCache } = require('./google-auth.js');
 const { sendEmail } = require('./sender.js');
 const { log } = require('./helpers.js');
-const { getAccount, upsertAccount, deleteAccount, recordSend } = require('./db.js');
-const {
-  signState, verifyState, buildAuthUrl,
-  exchangeLoginCode, exchangeConnectCode, revokeToken
-} = require('./oauth.js');
+const { getAccount, upsertAccount, setAccountDisabled, deleteAccount, recordSend } = require('./db.js');
+const { verifyState, buildAuthUrl, exchangeCode, revokeToken } = require('./oauth.js');
 const { getAccountStats, getRecentSends, getErrorBreakdown } = require('./stats.js');
 const { getSession, setSession, clearSession, getCsrfToken, verifyCsrfToken } = require('./session.js');
 const pages = require('./pages.js');
@@ -18,21 +15,21 @@ functions.http('gmailSender', async (req, res) => {
     const path = req.path || '/';
     const method = req.method;
 
-    // Health check (kept tiny so Cloud Run probes don't hit DB / sessions)
     if (method === 'GET' && path === '/healthz') {
       return res.status(200).send('OK');
     }
 
-    // ---- User-facing routes -------------------------------------------------
+    // ---- User-facing -------------------------------------------------------
     if (method === 'GET'  && path === '/')                return handleHome(req, res);
     if (method === 'GET'  && path === '/login')           return handleLoginPage(req, res);
-    if (method === 'GET'  && path === '/login/start')     return handleOAuthStart(req, res, 'login');
-    if (method === 'GET'  && path === '/connect/start')   return handleOAuthStart(req, res, 'connect');
+    if (method === 'GET'  && path === '/login/start')     return handleOAuthStart(req, res);
     if (method === 'GET'  && path === '/oauth/callback')  return handleOAuthCallback(req, res);
-    if (method === 'POST' && path === '/disconnect')      return handleDisconnect(req, res);
+    if (method === 'POST' && path === '/disable')         return handleDisable(req, res);
+    if (method === 'POST' && path === '/enable')          return handleEnable(req, res);
+    if (method === 'POST' && path === '/remove')          return handleRemove(req, res);
     if (method === 'POST' && path === '/logout')          return handleLogout(req, res);
 
-    // ---- Admin routes (Basic / Bearer / X-API-Key) --------------------------
+    // ---- Admin (Basic / Bearer / X-API-Key) --------------------------------
     if (method === 'GET'  && path === '/admin/accounts') {
       if (!requireAdmin(req, res)) return;
       return handleAdminDashboard(req, res);
@@ -108,10 +105,7 @@ function requireAdmin(req, res) {
 
 async function handleHome(req, res) {
   const session = getSession(req);
-  if (!session) {
-    // Not logged in — show the login landing page directly at /
-    return res.status(200).type('html').send(pages.loginPage());
-  }
+  if (!session) return res.status(200).type('html').send(pages.loginPage());
   return renderUserDashboard(req, res, session.email);
 }
 
@@ -131,26 +125,19 @@ function handleLogout(req, res) {
 }
 
 
-// ---- OAuth start ------------------------------------------------------------
-// /login/start    → GET /oauth/start kicks off Google sign-in (identity only)
-// /connect/start  → GET /oauth/start kicks off Gmail scope grant (requires session)
+// ---- OAuth ------------------------------------------------------------------
+// One flow: openid+profile+gmail.send+gmail.modify scopes, prompt=consent so
+// Google always returns a fresh refresh_token. The callback verifies the
+// id_token for identity AND saves the refresh_token for sending.
 
-function handleOAuthStart(req, res, action) {
-  if (action === 'connect') {
-    const session = getSession(req);
-    if (!session) return res.redirect(302, '/login');
-  }
+function handleOAuthStart(req, res) {
   try {
-    const url = buildAuthUrl(action);
-    return res.redirect(302, url);
+    return res.redirect(302, buildAuthUrl());
   } catch (e) {
-    log("Error", `OAuth start (${action}) failed: ${e.message}`);
+    log("Error", `OAuth start failed: ${e.message}`);
     return res.status(500).type('html').send(pages.errorPage(e.message));
   }
 }
-
-
-// ---- OAuth callback ---------------------------------------------------------
 
 async function handleOAuthCallback(req, res) {
   const code = req.query.code ? req.query.code.toString() : '';
@@ -164,74 +151,83 @@ async function handleOAuthCallback(req, res) {
     return res.status(400).type('html').send(pages.errorPage('Missing authorization code.'));
   }
 
-  let state;
   try {
-    state = verifyState(stateStr);
+    verifyState(stateStr);
   } catch (e) {
     return res.status(400).type('html').send(pages.errorPage(`Invalid state: ${e.message}`));
   }
 
-  if (state.action === 'login') {
-    try {
-      const { email } = await exchangeLoginCode(code);
-      setSession(res, email);
-      log("Info", `Login: ${email}`);
-      return res.redirect(302, '/');
-    } catch (e) {
-      log("Error", `Login failed: ${e.message}`);
-      return res.status(400).type('html').send(pages.errorPage(`Sign-in failed: ${e.message}`));
-    }
+  let result;
+  try {
+    result = await exchangeCode(code);
+  } catch (e) {
+    log("Error", `Code exchange failed: ${e.message}`);
+    return res.status(400).type('html').send(pages.errorPage(`Sign-in failed: ${e.message}`));
   }
 
-  if (state.action === 'connect') {
-    const session = getSession(req);
-    if (!session) {
-      return res.status(401).type('html').send(pages.errorPage('Your session expired. Please sign in again.'));
-    }
-    let result;
-    try {
-      result = await exchangeConnectCode(code);
-    } catch (e) {
-      log("Error", `Connect code exchange failed: ${e.message}`);
-      return res.status(400).type('html').send(pages.errorPage(`Could not complete connection: ${e.message}`, { signedIn: true }));
-    }
-    const { email, refreshToken } = result;
-    if (email !== session.email) {
-      // The user signed in to Google as a different account during the connect
-      // flow. Revoke what we just got and tell them to retry as the right user.
-      await revokeToken(refreshToken).catch(() => {});
-      return res.status(403).type('html').send(pages.errorPage(
-        `You're signed in as ${session.email}, but you granted access for ${email}. ` +
-        `Sign out and sign in as ${email}, or grant access from the matching Google account.`,
-        { signedIn: true }
-      ));
-    }
-    try {
-      await upsertAccount(email, refreshToken);
-      invalidateAuthCache(email);
-      log("Info", `Connected account ${email}`);
-      return res.status(200).type('html').send(pages.connectedPage(email));
-    } catch (e) {
-      log("Error", `Connect save failed for ${email}: ${e.message}`);
-      return res.status(500).type('html').send(pages.errorPage(`Could not save connection: ${e.message}`, { signedIn: true }));
-    }
-  }
+  const { email, refreshToken } = result;
 
-  return res.status(400).type('html').send(pages.errorPage(`Unknown action: ${state.action}`));
+  try {
+    // upsert: keeps existing `disabled` flag for returning users, rotates token
+    await upsertAccount(email, refreshToken);
+    invalidateAuthCache(email);
+    setSession(res, email);
+    log("Info", `Signed in: ${email}`);
+    return res.redirect(302, '/');
+  } catch (e) {
+    log("Error", `Could not save sign-in for ${email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not complete sign-in: ${e.message}`));
+  }
 }
 
 
-// ---- Disconnect (POST) ------------------------------------------------------
+// ---- Disable / Enable / Remove ----------------------------------------------
 
-async function handleDisconnect(req, res) {
+function requireUserCsrf(req, res) {
   const session = getSession(req);
-  if (!session) return res.redirect(302, '/login');
-
+  if (!session) {
+    res.redirect(302, '/login');
+    return null;
+  }
   const csrf = (req.body && req.body.csrf) || '';
   if (!verifyCsrfToken(csrf)) {
-    return res.status(403).type('html').send(pages.errorPage('Invalid CSRF token. Reload and try again.', { signedIn: true }));
+    res.status(403).type('html').send(pages.errorPage('Invalid CSRF token. Reload and try again.', { signedIn: true }));
+    return null;
   }
+  return session;
+}
 
+async function handleDisable(req, res) {
+  const session = requireUserCsrf(req, res);
+  if (!session) return;
+  try {
+    await setAccountDisabled(session.email, true);
+    invalidateAuthCache(session.email);
+    log("Info", `Disabled ${session.email}`);
+    return res.redirect(302, '/');
+  } catch (e) {
+    log("Error", `Disable failed for ${session.email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not pause sending: ${e.message}`, { signedIn: true }));
+  }
+}
+
+async function handleEnable(req, res) {
+  const session = requireUserCsrf(req, res);
+  if (!session) return;
+  try {
+    await setAccountDisabled(session.email, false);
+    invalidateAuthCache(session.email);
+    log("Info", `Enabled ${session.email}`);
+    return res.redirect(302, '/');
+  } catch (e) {
+    log("Error", `Enable failed for ${session.email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not resume sending: ${e.message}`, { signedIn: true }));
+  }
+}
+
+async function handleRemove(req, res) {
+  const session = requireUserCsrf(req, res);
+  if (!session) return;
   try {
     const existing = await getAccount(session.email);
     if (existing) {
@@ -239,12 +235,13 @@ async function handleDisconnect(req, res) {
       if (!ok) log("Info", `Token revoke for ${session.email} returned non-OK; deleting row anyway.`);
       await deleteAccount(session.email);
       invalidateAuthCache(session.email);
-      log("Info", `Disconnected ${session.email}`);
+      log("Info", `Removed ${session.email}`);
     }
-    return res.status(200).type('html').send(pages.disconnectedPage(session.email));
+    clearSession(res);
+    return res.redirect(302, '/login');
   } catch (e) {
-    log("Error", `Disconnect failed for ${session.email}: ${e.message}`);
-    return res.status(500).type('html').send(pages.errorPage(`Could not disconnect: ${e.message}`, { signedIn: true }));
+    log("Error", `Remove failed for ${session.email}: ${e.message}`);
+    return res.status(500).type('html').send(pages.errorPage(`Could not remove account: ${e.message}`, { signedIn: true }));
   }
 }
 
@@ -278,7 +275,7 @@ async function renderUserDashboard(req, res, email) {
 }
 
 
-// ---- Admin (kept behind admin auth) ----------------------------------------
+// ---- Admin ------------------------------------------------------------------
 
 async function handleAdminDashboard(req, res) {
   try {
@@ -313,8 +310,6 @@ async function handleAdminUnenroll(req, res) {
   }
 }
 
-// Admin CSRF is namespaced separately so admin-form tokens can't be replayed
-// against user forms and vice versa.
 function getAdminCsrf() {
   return crypto.createHmac('sha256', process.env.STATE_SECRET || process.env.API_KEY).update('admin-csrf').digest('hex');
 }
@@ -351,7 +346,7 @@ async function handleApiStats(req, res) {
 }
 
 
-// ---- /send (unchanged shape) -----------------------------------------------
+// ---- /send ------------------------------------------------------------------
 
 async function handleSend(req, res) {
   const body = req.body || {};

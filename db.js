@@ -36,11 +36,21 @@ async function ensureSchema() {
       CREATE TABLE IF NOT EXISTS accounts (
         email VARCHAR(255) NOT NULL PRIMARY KEY,
         refresh_token TEXT NOT NULL,
+        disabled BOOLEAN NOT NULL DEFAULT FALSE,
         enrolled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_used_at DATETIME NULL,
         total_sends BIGINT NOT NULL DEFAULT 0
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    // Idempotent migration for pre-existing deployments that have an accounts
+    // table without the `disabled` column.
+    const [cols] = await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = 'accounts' AND column_name = 'disabled'`
+    );
+    if (Number(cols[0].c) === 0) {
+      await conn.query(`ALTER TABLE accounts ADD COLUMN disabled BOOLEAN NOT NULL DEFAULT FALSE`);
+    }
     await conn.query(`
       CREATE TABLE IF NOT EXISTS send_logs (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -67,18 +77,30 @@ async function ensureSchema() {
 async function getAccount(email) {
   await ensureSchema();
   const [rows] = await getPool().query(
-    'SELECT email, refresh_token, enrolled_at, last_used_at, total_sends FROM accounts WHERE email = ?',
+    'SELECT email, refresh_token, disabled, enrolled_at, last_used_at, total_sends FROM accounts WHERE email = ?',
     [email.toLowerCase()]
   );
-  return rows[0] || null;
+  const row = rows[0];
+  if (!row) return null;
+  row.disabled = !!row.disabled;
+  return row;
 }
 
 async function listAccounts() {
   await ensureSchema();
   const [rows] = await getPool().query(
-    'SELECT email, enrolled_at, last_used_at, total_sends FROM accounts ORDER BY email ASC'
+    'SELECT email, disabled, enrolled_at, last_used_at, total_sends FROM accounts ORDER BY email ASC'
   );
-  return rows;
+  return rows.map((r) => ({ ...r, disabled: !!r.disabled }));
+}
+
+async function setAccountDisabled(email, disabled) {
+  await ensureSchema();
+  const [result] = await getPool().query(
+    'UPDATE accounts SET disabled = ? WHERE email = ?',
+    [disabled ? 1 : 0, email.toLowerCase()]
+  );
+  return result.affectedRows > 0;
 }
 
 async function upsertAccount(email, refreshToken) {
@@ -125,6 +147,7 @@ module.exports = {
   getAccount,
   listAccounts,
   upsertAccount,
+  setAccountDisabled,
   deleteAccount,
   recordSend
 };

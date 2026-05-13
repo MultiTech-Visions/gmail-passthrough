@@ -1,14 +1,18 @@
 const crypto = require('crypto');
 const { google } = require('googleapis');
 
-const LOGIN_SCOPES   = ['openid', 'email', 'profile'];
-const CONNECT_SCOPES = [
+// One OAuth flow grants everything we need at sign-in time:
+//   - openid / email / profile  → identify the user, get a signed id_token
+//   - gmail.send / gmail.modify → send mail and look up thread metadata
+const SCOPES = [
+  'openid',
+  'email',
+  'profile',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/gmail.modify'
 ];
 
-const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const VALID_ACTIONS = new Set(['login', 'connect']);
+const STATE_TTL_MS = 10 * 60 * 1000;
 
 function getStateSecret() {
   const secret = process.env.STATE_SECRET || process.env.API_KEY;
@@ -30,11 +34,9 @@ function buildOAuthClient() {
   );
 }
 
-// Stateless signed state token: base64url(payload).hex(hmac(payload)).
-// Payload: { action: 'login' | 'connect', exp, nonce, returnTo? }.
-function signState(payload) {
-  const json = JSON.stringify({ ...payload, exp: Date.now() + STATE_TTL_MS, nonce: crypto.randomBytes(8).toString('hex') });
-  const b64 = Buffer.from(json, 'utf-8').toString('base64url');
+function signState() {
+  const payload = { exp: Date.now() + STATE_TTL_MS, nonce: crypto.randomBytes(8).toString('hex') };
+  const b64 = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
   const sig = crypto.createHmac('sha256', getStateSecret()).update(b64).digest('hex');
   return `${b64}.${sig}`;
 }
@@ -50,38 +52,39 @@ function verifyState(token) {
   }
   const payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf-8'));
   if (!payload.exp || Date.now() > payload.exp) throw new Error('State expired');
-  if (!VALID_ACTIONS.has(payload.action)) throw new Error(`Invalid action: ${payload.action}`);
   return payload;
 }
 
-function buildAuthUrl(action, extraStatePayload = {}) {
-  if (!VALID_ACTIONS.has(action)) throw new Error(`Invalid action: ${action}`);
+function buildAuthUrl() {
   const client = buildOAuthClient();
-  const state = signState({ action, ...extraStatePayload });
-  const scope = action === 'login' ? LOGIN_SCOPES : CONNECT_SCOPES;
-
-  const opts = {
+  return client.generateAuthUrl({
     access_type: 'offline',
-    scope,
-    state,
+    // Force the consent screen on every sign-in so Google always returns a
+    // fresh refresh_token (otherwise returning users would get only an
+    // id_token, with no way to rotate the stored token).
+    prompt: 'consent',
+    scope: SCOPES,
+    state: signState(),
     include_granted_scopes: true
-  };
-  // For `connect` we must force the consent screen so Google always returns a
-  // refresh_token. For `login` we don't need a refresh_token, so we can skip
-  // the prompt for a smoother UX.
-  if (action === 'connect') opts.prompt = 'consent';
-
-  return client.generateAuthUrl(opts);
+  });
 }
 
-// Login: verify the id_token Google returned and pull the email claim out of
-// it. No Gmail scopes needed.
-async function exchangeLoginCode(code) {
+// Exchange the authorization code for both:
+//   - an id_token  → email of the signed-in user (verified)
+//   - a refresh_token → ability to send as that user later
+async function exchangeCode(code) {
   const client = buildOAuthClient();
   const { tokens } = await client.getToken(code);
   if (!tokens.id_token) {
     throw new Error('Google did not return an id_token; cannot identify user.');
   }
+  if (!tokens.refresh_token) {
+    throw new Error(
+      'Google did not return a refresh_token. The account may already have an active grant; ' +
+      'remove it at https://myaccount.google.com/permissions and try again.'
+    );
+  }
+
   const ticket = await client.verifyIdToken({
     idToken: tokens.id_token,
     audience: process.env.GMAIL_CLIENT_ID
@@ -93,23 +96,11 @@ async function exchangeLoginCode(code) {
   if (payload.email_verified === false) {
     throw new Error('Google reports this email is not verified.');
   }
-  return { email: payload.email.toLowerCase() };
-}
 
-// Connect: exchange the code for a refresh_token and look up the email via
-// gmail.users.getProfile (we have the gmail scopes here).
-async function exchangeConnectCode(code) {
-  const client = buildOAuthClient();
-  const { tokens } = await client.getToken(code);
-  if (!tokens.refresh_token) {
-    throw new Error('Google did not return a refresh_token. The account may have already granted access; revoke at https://myaccount.google.com/permissions and try again.');
-  }
-  client.setCredentials(tokens);
-  const gmail = google.gmail({ version: 'v1', auth: client });
-  const profile = await gmail.users.getProfile({ userId: 'me' });
-  const email = (profile.data.emailAddress || '').toLowerCase();
-  if (!email) throw new Error('Could not determine email address from Google profile');
-  return { email, refreshToken: tokens.refresh_token };
+  return {
+    email: payload.email.toLowerCase(),
+    refreshToken: tokens.refresh_token
+  };
 }
 
 async function revokeToken(refreshToken) {
@@ -126,8 +117,7 @@ module.exports = {
   signState,
   verifyState,
   buildAuthUrl,
-  exchangeLoginCode,
-  exchangeConnectCode,
+  exchangeCode,
   revokeToken,
   getRedirectUri
 };

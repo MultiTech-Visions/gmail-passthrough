@@ -20,7 +20,12 @@ async function resolveRefreshToken(emailAddress) {
   const key = emailAddress.toLowerCase();
 
   const row = await getAccount(key);
-  if (row && row.refresh_token) return row.refresh_token;
+  if (row && row.refresh_token) {
+    if (row.disabled) {
+      throw new Error(`Account ${key} is disabled. The owner can re-enable it from their dashboard.`);
+    }
+    return row.refresh_token;
+  }
 
   // Backwards-compatibility: legacy deployments may still keep tokens in
   // ACCOUNTS_CONFIG. Fall back to that if the DB has no entry.
@@ -29,7 +34,7 @@ async function resolveRefreshToken(emailAddress) {
     return envConf[key].refreshToken;
   }
 
-  throw new Error(`No configuration found for account: ${emailAddress}. Enroll it at /enroll.`);
+  throw new Error(`No configuration found for account: ${emailAddress}. The owner must sign in at this service to grant access.`);
 }
 
 async function getAuthClient(emailAddress) {

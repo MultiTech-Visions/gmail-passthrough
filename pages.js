@@ -88,8 +88,11 @@ function loginPage() {
   return layout('Gmail Sender — Sign in', `
     <div style="margin-top: 4rem; text-align: center;">
       <h1>Gmail Sender</h1>
-      <p class="sub">Sign in with Google to connect your Gmail account.</p>
+      <p class="sub">Sign in with Google to let this service send mail on behalf of your Gmail account.</p>
       <p><a class="btn" href="/login/start">Sign in with Google</a></p>
+      <p class="muted" style="font-size:0.85rem; margin-top:1rem; max-width:32rem; margin-left:auto; margin-right:auto;">
+        Signing in requests permission to send mail as your account. You can pause sending or remove the connection at any time.
+      </p>
     </div>
   `);
 }
@@ -102,38 +105,53 @@ function fmtDate(d) {
 }
 
 
-// Logged-in dashboard for a single user. `summary` may be null when the user
-// hasn't connected their Gmail yet (i.e. they signed in but never granted
-// gmail.send scope).
+// Logged-in dashboard for a single user. After sign-in, the row always
+// exists — there's no separate "connect" step. `summary` is null only in
+// the unusual case where the cookie outlived the DB row (e.g. the account
+// was removed via /admin/unenroll); in that case we show a re-sign-in card.
 function userDashboard({ email, csrfToken, summary, recent, errors }) {
-  const notConnected = !summary;
+  const missing = !summary;
+  const disabled = !!(summary && summary.disabled);
 
-  const connectCard = notConnected
+  const stateCard = missing
     ? `
       <div class="card">
-        <h2 style="margin-top:0">Your Gmail isn't connected yet</h2>
-        <p class="muted">Grant this service permission to send mail as <code>${esc(email)}</code>. You can disconnect anytime.</p>
-        <p><a class="btn" href="/connect/start">Connect ${esc(email)}</a></p>
+        <h2 style="margin-top:0">Your account is gone</h2>
+        <p class="muted">Your session is still valid but no Gmail connection is on file. Sign in again to set things up.</p>
+        <p><a class="btn" href="/login/start">Sign in with Google</a></p>
       </div>`
     : `
       <div class="card">
         <div class="row">
           <div class="grow">
             <strong><code>${esc(email)}</code></strong>
-            <span class="pill ok">connected</span>
+            ${disabled ? '<span class="pill err">sending paused</span>' : '<span class="pill ok">sending enabled</span>'}
             <div class="muted" style="margin-top:0.25rem">
               Connected ${fmtDate(summary.enrolledAt)} · Last used ${fmtDate(summary.lastUsedAt)}
             </div>
           </div>
-          <form class="inline" method="POST" action="/disconnect"
-                onsubmit="return confirm('Disconnect ${esc(email)}? The service will lose permission to send as this account.');">
+          ${disabled
+            ? `<form class="inline" method="POST" action="/enable">
+                 <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+                 <button class="btn" type="submit">Resume sending</button>
+               </form>`
+            : `<form class="inline" method="POST" action="/disable"
+                     onsubmit="return confirm('Pause sending for ${esc(email)}? The connection is kept; you can resume any time.');">
+                 <input type="hidden" name="csrf" value="${esc(csrfToken)}">
+                 <button class="btn secondary" type="submit">Pause sending</button>
+               </form>`}
+          <form class="inline" method="POST" action="/remove"
+                onsubmit="return confirm('Remove ${esc(email)} completely? This revokes access at Google and deletes all stored data. This cannot be undone.');">
             <input type="hidden" name="csrf" value="${esc(csrfToken)}">
-            <button class="btn danger" type="submit">Disconnect</button>
+            <button class="btn danger" type="submit">Remove account</button>
           </form>
         </div>
+        ${disabled
+          ? `<p class="muted" style="margin: 0.75rem 0 0;">Sending is paused. /send requests for this account return an error. The refresh token is kept so you can resume instantly.</p>`
+          : ''}
       </div>`;
 
-  const statsBlock = notConnected ? '' : `
+  const statsBlock = missing ? '' : `
     <div class="grid">
       <div class="stat"><div class="n">${summary.totalSends}</div><div class="l">Total sends</div></div>
       <div class="stat"><div class="n">${summary.sends24h}</div><div class="l">Last 24h</div></div>
@@ -142,7 +160,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors }) {
     </div>
   `;
 
-  const recentBlock = notConnected ? '' : (() => {
+  const recentBlock = missing ? '' : (() => {
     if (!recent || recent.length === 0) {
       return `<h2>Recent sends</h2><div class="empty">No sends recorded yet.</div>`;
     }
@@ -162,7 +180,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors }) {
       </table>`;
   })();
 
-  const errorBlock = notConnected ? '' : (() => {
+  const errorBlock = missing ? '' : (() => {
     if (!errors || errors.length === 0) return '';
     const rows = errors.map((e) => `
       <tr>
@@ -181,30 +199,10 @@ function userDashboard({ email, csrfToken, summary, recent, errors }) {
   return layout('Your account', `
     ${userHeader(email, csrfToken)}
     <h1>Your account</h1>
-    ${connectCard}
+    ${stateCard}
     ${statsBlock}
     ${errorBlock}
     ${recentBlock}
-  `);
-}
-
-function connectedPage(email) {
-  return layout('Connected', `
-    <div style="margin-top: 4rem; text-align: center;">
-      <h1>Connected</h1>
-      <p class="sub"><code>${esc(email)}</code> can now send mail through this service.</p>
-      <p><a class="btn" href="/">Back to your account</a></p>
-    </div>
-  `);
-}
-
-function disconnectedPage(email) {
-  return layout('Disconnected', `
-    <div style="margin-top: 4rem; text-align: center;">
-      <h1>Disconnected</h1>
-      <p class="sub"><code>${esc(email)}</code> has been removed.</p>
-      <p><a class="btn" href="/">Back to your account</a></p>
-    </div>
   `);
 }
 
@@ -267,8 +265,6 @@ function adminDashboard(stats, csrfToken) {
 module.exports = {
   loginPage,
   userDashboard,
-  connectedPage,
-  disconnectedPage,
   errorPage,
   adminDashboard
 };
