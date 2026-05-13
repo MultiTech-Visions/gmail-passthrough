@@ -119,10 +119,10 @@ function loginPage() {
   return layout('Gmail Sender — Sign in', `
     <div style="margin-top: 4rem; text-align: center;">
       <h1>Gmail Sender</h1>
-      <p class="sub">Sign in with Google to let this service send mail on behalf of your Gmail account.</p>
+      <p class="sub">Send mail programmatically through your Gmail account.</p>
       <p><a class="btn" href="/login/start">Sign in with Google</a></p>
       <p class="muted" style="font-size:0.85rem; margin-top:1rem; max-width:32rem; margin-left:auto; margin-right:auto;">
-        Signing in requests permission to send mail as your account. You can pause sending or remove the connection at any time.
+        You can pause or remove the connection at any time.
       </p>
     </div>
   `);
