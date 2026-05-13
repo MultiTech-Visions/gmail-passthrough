@@ -6,7 +6,7 @@ const { log } = require('./helpers.js');
 const { getAccount, upsertAccount, setAccountDisabled, deleteAccount, recordSend, deleteApiKeysForAccount } = require('./db.js');
 const { verifyState, buildAuthUrl, exchangeCode, revokeToken } = require('./oauth.js');
 const { getAccountStats, getRecentSends, getErrorBreakdown } = require('./stats.js');
-const { getSession, setSession, clearSession, getCsrfToken, verifyCsrfToken } = require('./session.js');
+const { getSession, setSession, clearSession, setFlash, consumeFlash, getCsrfToken, verifyCsrfToken } = require('./session.js');
 const apikeys = require('./apikeys.js');
 const pages = require('./pages.js');
 
@@ -113,7 +113,12 @@ function requireAdmin(req, res) {
 async function handleHome(req, res) {
   const session = getSession(req);
   if (!session) return res.status(200).type('html').send(pages.loginPage());
-  return renderUserDashboard(req, res, session.email);
+
+  const flash = consumeFlash(req, res);
+  const newKey = (flash && flash.kind === 'new_key')
+    ? { plaintext: flash.plaintext, label: flash.label }
+    : null;
+  return renderUserDashboard(req, res, session.email, { newKey });
 }
 
 function handleLoginPage(req, res) {
@@ -264,8 +269,11 @@ async function handleCreateKey(req, res) {
   try {
     const { plaintext, last4 } = await apikeys.createKey({ accountEmail: session.email, label });
     log("Info", `Created API key for ${session.email} (last4=${last4})`);
-    // Re-render the dashboard with the plaintext shown once.
-    return renderUserDashboard(req, res, session.email, { newKey: { plaintext, label } });
+    // Post-Redirect-Get: stash the one-time plaintext in a flash cookie and
+    // bounce to GET / so reloading doesn't replay the POST and mint another
+    // key. The flash is consumed on the next dashboard render.
+    setFlash(res, { kind: 'new_key', plaintext, label });
+    return res.redirect(302, '/');
   } catch (e) {
     log("Error", `Create key failed for ${session.email}: ${e.message}`);
     return res.status(500).type('html').send(pages.errorPage(`Could not create key: ${e.message}`, { signedIn: true }));
