@@ -1,46 +1,67 @@
 const { google } = require('googleapis');
+const { getAccount } = require('./db.js');
 
-// ACCOUNTS_CONFIG is a JSON env var keyed by email address.
-// Each entry needs: { "refreshToken": "..." }
+// Per-account OAuth2 clients are cached in-memory keyed by email. We re-check
+// the database every CACHE_TTL_MS so re-enrollments / token rotation propagate.
+const CACHE_TTL_MS = 60 * 1000;
+const clientCache = new Map(); // email -> { client, refreshToken, fetchedAt }
 
-let accountsConfig = null;
-const authClients = {};
+let envAccountsConfig = undefined;
 
-function getAccountsConfig() {
-  if (accountsConfig) return accountsConfig;
-  accountsConfig = JSON.parse(process.env.ACCOUNTS_CONFIG);
-  return accountsConfig;
+function getEnvAccountsConfig() {
+  if (envAccountsConfig !== undefined) return envAccountsConfig;
+  envAccountsConfig = process.env.ACCOUNTS_CONFIG
+    ? JSON.parse(process.env.ACCOUNTS_CONFIG)
+    : null;
+  return envAccountsConfig;
 }
 
-function getAccountConfig(emailAddress) {
-  const config = getAccountsConfig();
-  const accountConf = config[emailAddress.toLowerCase()];
-  if (!accountConf) {
-    throw new Error(`No configuration found for account: ${emailAddress}. Check your ACCOUNTS_CONFIG env var.`);
+async function resolveRefreshToken(emailAddress) {
+  const key = emailAddress.toLowerCase();
+
+  const row = await getAccount(key);
+  if (row && row.refresh_token) {
+    if (row.disabled) {
+      throw new Error(`Account ${key} is disabled. The owner can re-enable it from their dashboard.`);
+    }
+    return row.refresh_token;
   }
-  return accountConf;
+
+  // Backwards-compatibility: legacy deployments may still keep tokens in
+  // ACCOUNTS_CONFIG. Fall back to that if the DB has no entry.
+  const envConf = getEnvAccountsConfig();
+  if (envConf && envConf[key] && envConf[key].refreshToken) {
+    return envConf[key].refreshToken;
+  }
+
+  throw new Error(`No configuration found for account: ${emailAddress}. The owner must sign in at this service to grant access.`);
 }
 
-function getAuthClient(emailAddress) {
-  if (authClients[emailAddress]) return authClients[emailAddress];
+async function getAuthClient(emailAddress) {
+  const key = emailAddress.toLowerCase();
+  const refreshToken = await resolveRefreshToken(key);
 
-  const accountConf = getAccountConfig(emailAddress);
+  const cached = clientCache.get(key);
+  if (cached && cached.refreshToken === refreshToken && (Date.now() - cached.fetchedAt) < CACHE_TTL_MS) {
+    return cached.client;
+  }
 
-  const oauth2Client = new google.auth.OAuth2(
+  const client = new google.auth.OAuth2(
     process.env.GMAIL_CLIENT_ID,
     process.env.GMAIL_CLIENT_SECRET
   );
+  client.setCredentials({ refresh_token: refreshToken });
 
-  oauth2Client.setCredentials({
-    refresh_token: accountConf.refreshToken
-  });
-
-  authClients[emailAddress] = oauth2Client;
-  return oauth2Client;
+  clientCache.set(key, { client, refreshToken, fetchedAt: Date.now() });
+  return client;
 }
 
-function getGmailService(emailAddress) {
-  return google.gmail({ version: 'v1', auth: getAuthClient(emailAddress) });
+async function getGmailService(emailAddress) {
+  return google.gmail({ version: 'v1', auth: await getAuthClient(emailAddress) });
 }
 
-module.exports = { getGmailService };
+function invalidateAuthCache(emailAddress) {
+  clientCache.delete(emailAddress.toLowerCase());
+}
+
+module.exports = { getGmailService, invalidateAuthCache };

@@ -1,133 +1,142 @@
 # Gmail Sender — Cloud Run
 
-A minimal Cloud Run service that sends emails via the Gmail API. Supports
-multiple Gmail accounts from a single deployment.
+A Cloud Run service that sends mail through the Gmail API on behalf of
+users who connect their Google accounts. Each user signs in with Google,
+sees their own dashboard, and can connect or disconnect their Gmail.
+
+
+## How it works
+
+1. A user visits the site and clicks **Sign in with Google**. The single
+   OAuth flow requests both identity scopes (`openid`, `email`, `profile`)
+   and send scopes (`gmail.send`, `gmail.modify`) at once. Google returns
+   both an id_token (for identifying the user) and a refresh_token (saved
+   to the database for sending).
+2. They land on their own dashboard with full stats and two controls:
+   - **Pause sending** — sets a `disabled` flag. The refresh token is kept,
+     but `/send` refuses to use the account. The user can resume any time
+     with a single click.
+   - **Remove account** — revokes the refresh token at Google and deletes
+     the row. The user is signed out.
+3. A separate `POST /send` endpoint (protected by `API_KEY`) is what your
+   other services hit when they want to send mail through a connected
+   account.
+
+A user can only manage their own Gmail. There's no separate "connect" step —
+sign-in grants everything in one OAuth dance.
 
 
 ## Files
 
-| File             | Purpose                                                    |
-|------------------|------------------------------------------------------------|
-| `index.js`       | HTTP entry point and `/send` route                         |
-| `google-auth.js` | Per-account OAuth2 clients, account config parsing         |
-| `sender.js`      | Sends email replies (in-thread) or new emails via Gmail    |
-| `helpers.js`     | Structured logging                                         |
-| `package.json`   | Dependencies and start script                              |
+| File             | Purpose                                                |
+|------------------|--------------------------------------------------------|
+| `index.js`       | HTTP entry point and route dispatch                    |
+| `session.js`     | Signed-cookie session + CSRF token helpers             |
+| `oauth.js`       | OAuth start / login / connect / revoke                 |
+| `pages.js`       | Server-rendered HTML (login, dashboard, success pages) |
+| `google-auth.js` | Per-account OAuth2 clients (DB-backed, cached)         |
+| `sender.js`      | Builds and sends Gmail messages                        |
+| `db.js`          | MySQL pool, schema, queries                            |
+| `stats.js`       | Per-account totals, recent sends, error breakdown      |
+| `helpers.js`     | Structured logging                                     |
+
+
+## Routes
+
+| Method | Path                  | Auth          | Description                                       |
+|--------|-----------------------|---------------|---------------------------------------------------|
+| GET    | `/healthz`            | none          | Health check                                      |
+| GET    | `/`                   | none          | Login page (if signed out) or dashboard           |
+| GET    | `/login`              | none          | "Sign in with Google" page                        |
+| GET    | `/login/start`        | none          | Begins the single Google OAuth flow               |
+| GET    | `/oauth/callback`     | none          | Google redirects here; sets session + saves token |
+| POST   | `/disable`            | session+CSRF  | Pause sending (keeps the refresh token)           |
+| POST   | `/enable`             | session+CSRF  | Resume sending                                    |
+| POST   | `/remove`             | session+CSRF  | Revoke + delete + sign out                        |
+| POST   | `/logout`             | session+CSRF  | Clear the session cookie                          |
+| GET    | `/admin/accounts`     | admin         | All-accounts dashboard (operations view)          |
+| POST   | `/admin/unenroll`     | admin+CSRF    | Admin force-removes any account                   |
+| GET    | `/api/stats`          | admin         | JSON stats — all accounts or one                  |
+| POST   | `/send`               | API_KEY       | Send an email (reply in-thread or new)            |
+
+### Auth
+
+- **Session.** A signed cookie (`gms_session`, HttpOnly, Secure, SameSite=Lax,
+  30-day TTL) tracks the signed-in user's email. Issued after a successful
+  Google sign-in; verified via HMAC of `STATE_SECRET`.
+- **Admin.** `/admin/*` and `/api/stats` accept the `API_KEY` via HTTP Basic
+  auth (any username, password = `API_KEY`), or `Authorization: Bearer …`,
+  or `X-API-Key: …`.
+- **API_KEY.** `POST /send` requires the key in `Authorization: Bearer …` or
+  `X-API-Key: …`.
 
 
 ## Setup
 
 ### 1. Enable the Gmail API
 
-1. Go to **Google Cloud Console** → select your project (or create one)
-2. Go to **APIs & Services** → **Library**
-3. Enable the **Gmail API**
+1. **Google Cloud Console** → select your project
+2. **APIs & Services → Library** → enable **Gmail API**
 
+### 2. Create OAuth2 credentials
 
-### 2. Create OAuth2 Credentials
+1. **APIs & Services → Credentials**
+2. **+ Create Credentials → OAuth client ID**, type **Web application**
+3. **Authorized redirect URIs** → add `https://YOUR-CLOUD-RUN-URL.run.app/oauth/callback`
+4. Copy the **Client ID** and **Client Secret**.
 
-1. Go to **APIs & Services** → **Credentials**
-2. Click **+ Create Credentials** → **OAuth client ID**
-3. Application type: **Web application**
-4. Under **Authorized redirect URIs**, click **+ Add URI** and enter:
-   `https://developers.google.com/oauthplayground`
-5. Click **Create**
-6. Copy the **Client ID** and **Client Secret**
+### 3. Configure the OAuth consent screen
 
+Add the scopes the app uses:
+- `openid`, `email`, `profile` (sign-in)
+- `https://www.googleapis.com/auth/gmail.send` (sending)
+- `https://www.googleapis.com/auth/gmail.modify` (in-thread replies)
 
-### 3. Get a Refresh Token (repeat for each Gmail account)
+If you keep the app in "Testing" mode, add the users you want to allow on
+the test-user list. Otherwise publish it.
 
-1. Go to https://developers.google.com/oauthplayground
-2. Click the **gear icon** (top right) → check **Use your own OAuth credentials**
-3. Paste in your Client ID and Client Secret
-4. In the left panel under **Step 1**, find and check this scope:
-   - `https://www.googleapis.com/auth/gmail.send`
+### 4. Create the Cloud SQL (MySQL) instance
 
-   (If you also want to reply in-thread, add `https://www.googleapis.com/auth/gmail.modify`
-   so the service can look up the thread's headers.)
-5. Click **Authorize APIs** — sign in with the Gmail account you want to connect
-6. Click **Exchange authorization code for tokens**
-7. Copy the **Refresh Token**
+1. **Cloud SQL** → **+ Create Instance** → **MySQL**
+2. Region: match your Cloud Run service
+3. Create a database, e.g. `gmail_sender`
+4. Note the **Connection name** (`project:region:instance`)
 
+The schema is auto-applied on first request via `CREATE TABLE IF NOT EXISTS`.
 
-### 4. Deploy to Cloud Run
+### 5. Deploy to Cloud Run
 
-1. Go to **Google Cloud Console** → **Cloud Run**
-2. Click **+ Create Function**
-3. Configure:
-   - **Function name**: `gmail-sender` (or whatever you want)
-   - **Region**: pick one close to you
-   - **Trigger type**: **HTTPS**
-   - **Authentication**: pick based on your security preference
-4. Under **Runtime, build, connections and security settings**:
-   - **Memory**: 256 MB is plenty
-   - **Timeout**: 60 seconds
-5. Add the environment variables listed below
-6. Set the **Runtime** to Node.js 20+
-7. Set the **Entry point** to `gmailSender`
-8. Paste in or upload all source files
-9. Click **Deploy**
+- Authentication: **Allow unauthenticated** (the app gates itself)
+- Runtime: Node.js 20+
+- Entry point: `gmailSender`
+- Attach your Cloud SQL instance under **Cloud SQL connections**
+- Set the env vars below
 
 
 ## Environment Variables
 
-| Variable              | Description                                                    |
-|-----------------------|----------------------------------------------------------------|
-| `API_KEY`             | Shared secret required on every `/send` request (see below)    |
-| `GMAIL_CLIENT_ID`     | OAuth2 Client ID                                               |
-| `GMAIL_CLIENT_SECRET` | OAuth2 Client Secret                                           |
-| `ACCOUNTS_CONFIG`     | JSON object with per-account refresh tokens (see below)        |
+| Variable                   | Description                                                                 |
+|----------------------------|-----------------------------------------------------------------------------|
+| `API_KEY`                  | Shared secret for `POST /send` and admin endpoints                          |
+| `STATE_SECRET`             | (optional) HMAC secret for session + OAuth state. Defaults to `API_KEY`.    |
+| `GMAIL_CLIENT_ID`          | OAuth2 Client ID                                                            |
+| `GMAIL_CLIENT_SECRET`      | OAuth2 Client Secret                                                        |
+| `OAUTH_REDIRECT_URI`       | Must match the URI registered above (ends `/oauth/callback`)                |
+| `INSTANCE_CONNECTION_NAME` | Cloud SQL connection name `project:region:instance` (socket mode)           |
+| `DB_HOST` / `DB_PORT`      | Alternative to `INSTANCE_CONNECTION_NAME` for direct TCP (local dev)        |
+| `DB_USER` / `DB_PASS` / `DB_NAME` | MySQL credentials                                                    |
+| `ACCOUNTS_CONFIG`          | (legacy) Pre-DB JSON-keyed accounts; used as a fallback if DB has no row.   |
 
-Generate an `API_KEY` and store it in your caller (and in the Cloud Run env
-var). If `API_KEY` is unset the service rejects every request, so a
-misconfigured deploy can't leak sending.
-
-Pick whichever is handiest:
-
-- **Browser dev console** (open dev tools → Console tab, paste, hit enter):
-  ```js
-  Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
-  ```
-- **Terminal / Cloud Shell:** `openssl rand -hex 32`
-- **Node:** `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
-
-**`ACCOUNTS_CONFIG`** — a JSON object keyed by email address:
-
-```json
-{
-  "inbox@yourdomain.com": {
-    "refreshToken": "1//0xxxxxxxxxxxxx"
-  },
-  "referrals@yourdomain.com": {
-    "refreshToken": "1//0yyyyyyyyyyyyy"
-  }
-}
-```
-
-To add a new account later, add another entry and redeploy.
+Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32`.
 
 
-## Routes
+## `POST /send`
 
-| Method | Path    | Description                                |
-|--------|---------|--------------------------------------------|
-| GET    | `/`     | Health check — returns 200 OK              |
-| POST   | `/send` | Send an email (reply in-thread or new)     |
+Authentication: send `API_KEY` in `Authorization: Bearer <key>` or
+`X-API-Key: <key>`. Missing or wrong key → `401`.
 
-
-### `POST /send`
-
-**Authentication.** `/send` requires the configured `API_KEY`, sent in
-either of these headers:
-
-- `Authorization: Bearer <API_KEY>`
-- `X-API-Key: <API_KEY>`
-
-Missing or wrong key → `401 Unauthorized`.
-
-If `threadId` matches a real Gmail thread on the account, the service replies
-in-thread (with `In-Reply-To` / `References` headers set so the recipient's
-client threads it). Otherwise a brand-new email is sent to `recipientEmail`.
+If `threadId` matches a real Gmail thread on the account, the service
+replies in-thread; otherwise sends a brand-new email to `recipientEmail`.
 
 Request body:
 
@@ -144,116 +153,90 @@ Request body:
 
 | Field            | Required? | Notes                                                           |
 |------------------|-----------|-----------------------------------------------------------------|
-| `accountEmail`   | yes       | Which Gmail account to send from (must exist in `ACCOUNTS_CONFIG`) |
+| `accountEmail`   | yes       | Which Gmail account to send from (must be connected via the UI) |
 | `body`           | yes       | Plain-text body (newlines preserved)                            |
-| `htmlBody`       | no        | HTML body. If omitted, an HTML part is auto-generated from `body` (escaped, newlines → `<br>`) |
-| `recipientEmail` | see notes | Required if no `threadId`. If `threadId` is also given, overrides the auto-detected reply-to |
+| `htmlBody`       | no        | HTML body. If omitted, auto-generated from `body`               |
+| `recipientEmail` | see notes | Required if no `threadId`. Overrides the auto-detected reply-to |
 | `threadId`       | no        | Gmail thread ID; if found, reply goes in-thread                 |
 | `subject`        | no        | On replies, defaults to `Re: <original subject>`                |
 
 Every email is sent as `multipart/alternative` with both a `text/plain` and a
-`text/html` part, so clients that can render HTML will, and clients that
-can't will fall back to the plain text.
-
-**Simple case — just plain text:**
-```json
-{
-  "accountEmail": "inbox@yourdomain.com",
-  "recipientEmail": "patient@example.com",
-  "subject": "Hello",
-  "body": "Hi there,\n\nJust checking in.\n\n— The Team"
-}
-```
-The service generates the HTML version automatically.
-
-**Complex case — custom HTML + plain-text summary:**
-```json
-{
-  "accountEmail": "inbox@yourdomain.com",
-  "recipientEmail": "patient@example.com",
-  "subject": "Your report",
-  "body": "Summary: 3 new items this week. Open in a browser for the full table.",
-  "htmlBody": "<h1>Your report</h1><table>...</table>"
-}
-```
+`text/html` part. Every attempt — success or error — is logged to
+`send_logs`.
 
 Success response:
 
 ```json
-{
-  "status": "ok",
-  "mode": "reply",
-  "threadId": "...",
-  "messageId": "...",
-  "to": "...",
-  "subject": "..."
-}
+{ "status": "ok", "mode": "reply", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }
 ```
 
-`mode` is `"reply"` when the message went in-thread, `"new"` when it was a
-fresh email.
+`mode` is `"reply"` when the message went in-thread, `"new"` otherwise.
 
-Error response:
 
-```json
-{ "status": "error", "error": "..." }
+## Schema
+
+```sql
+CREATE TABLE accounts (
+  email          VARCHAR(255) PRIMARY KEY,
+  refresh_token  TEXT         NOT NULL,
+  disabled       BOOLEAN      NOT NULL DEFAULT FALSE,
+  enrolled_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at   DATETIME     NULL,
+  total_sends    BIGINT       NOT NULL DEFAULT 0
+);
+
+CREATE TABLE send_logs (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  account_email  VARCHAR(255) NOT NULL,
+  recipient      VARCHAR(255) NULL,
+  subject        TEXT         NULL,
+  thread_id      VARCHAR(255) NULL,
+  mode           ENUM('new','reply') NULL,
+  status         ENUM('ok','error')  NOT NULL,
+  error_message  TEXT         NULL,
+  sent_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_account_sent (account_email, sent_at),
+  INDEX idx_status_sent  (status, sent_at)
+);
 ```
 
 
-## Testing from Google Apps Script
+## Migrating from `ACCOUNTS_CONFIG`
 
-Drop this into a new Apps Script project, fill in the four constants at the
-top, and run `runTest`. It sends a fresh email, then immediately replies
-in-thread using the returned `threadId` — so you verify both the new-email
-path and the in-thread reply path in one shot.
+For a soft cutover: keep `ACCOUNTS_CONFIG` set during the first deploy. The
+DB is checked first; if no row exists, the legacy env var is used as a
+fallback. Once each user has signed in and connected their Gmail via the UI,
+drop the env var and redeploy.
+
+
+## Testing `/send` from Google Apps Script
 
 ```js
-const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app'; // no trailing slash
+const GMAIL_SENDER_URL = 'https://YOUR-CLOUD-RUN-URL.run.app';
 const API_KEY          = 'YOUR_API_KEY';
-const FROM_ACCOUNT     = 'inbox@yourdomain.com';   // must be in ACCOUNTS_CONFIG
-const TO_ADDRESS       = 'you@yourdomain.com';     // who receives the test
+const FROM_ACCOUNT     = 'inbox@yourdomain.com';
+const TO_ADDRESS       = 'you@yourdomain.com';
 
 function runTest() {
-  // Step 1: send a brand-new email.
-  const newResult = post({
+  const r = post({
     accountEmail:   FROM_ACCOUNT,
     recipientEmail: TO_ADDRESS,
-    subject:        'Hello World from Gmail Sender',
-    body:           'Hello, world!\n\nThis is a test email.\n\n— sent ' + new Date().toISOString()
-    // htmlBody: '<h1>Hello, world!</h1><p>Optional — omit to auto-generate from body.</p>'
+    subject:        'Hello from Gmail Sender',
+    body:           'Hello, world!\n\n— ' + new Date().toISOString()
   });
-  Logger.log('New email sent. threadId=%s', newResult.threadId);
-
-  // Step 2: reply in-thread to the email we just sent.
-  const replyResult = post({
-    accountEmail: FROM_ACCOUNT,
-    threadId:     newResult.threadId,
-    body:         'Replying in-thread!\n\n— sent ' + new Date().toISOString()
-  });
-  Logger.log('Reply sent. threadId=%s mode=%s', replyResult.threadId, replyResult.mode);
+  Logger.log('threadId=%s', r.threadId);
 }
 
 function post(payload) {
-  const response = UrlFetchApp.fetch(GMAIL_SENDER_URL + '/send', {
+  const r = UrlFetchApp.fetch(GMAIL_SENDER_URL + '/send', {
     method: 'post',
     contentType: 'application/json',
     headers: { Authorization: 'Bearer ' + API_KEY },
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
-
-  const code = response.getResponseCode();
-  const text = response.getContentText();
-  Logger.log('HTTP %s\n%s', code, text);
-
-  if (code !== 200) throw new Error('Request failed (' + code + '): ' + text);
-  return JSON.parse(text);
+  const code = r.getResponseCode();
+  if (code !== 200) throw new Error('HTTP ' + code + ': ' + r.getContentText());
+  return JSON.parse(r.getContentText());
 }
 ```
-
-Notes:
-- `muteHttpExceptions: true` lets you see the real error body on 4xx/5xx
-  responses instead of a generic Apps Script exception.
-- The first call logs `"mode":"new"`; the second call should log `"mode":"reply"`
-  with the same `threadId`.
-- Uncomment the `htmlBody` line to also exercise the custom-HTML path.
