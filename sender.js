@@ -8,10 +8,12 @@ const { log } = require('./helpers.js');
 // text/html part. If htmlBody is omitted, an HTML part is auto-generated from
 // body (HTML-escaped, newlines -> <br>).
 
-async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body, htmlBody }) {
+async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body, htmlBody, replyTo }) {
   if (!body) {
     throw new Error("Missing required field: body");
   }
+
+  const cleanReplyTo = sanitizeHeaderValue(replyTo);
 
   let thread = null;
   if (threadId) {
@@ -33,14 +35,22 @@ async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subjec
   }
 
   if (thread && thread.messages && thread.messages.length > 0) {
-    return await replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody });
+    return await replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody, replyTo: cleanReplyTo });
   }
 
   if (!recipientEmail) {
     throw new Error("No thread found and no recipientEmail provided — cannot send.");
   }
 
-  return await sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody });
+  return await sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody, replyTo: cleanReplyTo });
+}
+
+// Strip CR/LF (and surrounding whitespace) to prevent header injection.
+// Returns null if the result is empty.
+function sanitizeHeaderValue(v) {
+  if (!v) return null;
+  const cleaned = String(v).replace(/[\r\n]+/g, ' ').trim();
+  return cleaned || null;
 }
 
 
@@ -53,7 +63,7 @@ function parseFirstAddress(header) {
   return header.split(',')[0].trim();
 }
 
-async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody }) {
+async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody, replyTo }) {
   const lastMessage = thread.messages[thread.messages.length - 1];
   const headers = lastMessage.payload.headers;
 
@@ -97,7 +107,8 @@ async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subj
     body,
     htmlBody,
     inReplyTo: originalMessageId || undefined,
-    references: references || undefined
+    references: references || undefined,
+    replyTo: replyTo || undefined
   });
 
   const sendResp = await gmail.users.messages.send({
@@ -115,17 +126,19 @@ async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subj
     threadId: thread.id,
     messageId: sendResp.data.id,
     to,
-    subject: replySubject
+    subject: replySubject,
+    replyTo: replyTo || null
   };
 }
 
 
-async function sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody }) {
+async function sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody, replyTo }) {
   const raw = buildRawEmail({
     to: recipientEmail,
     subject: subject || '(no subject)',
     body,
-    htmlBody
+    htmlBody,
+    replyTo: replyTo || undefined
   });
 
   const sendResp = await gmail.users.messages.send({
@@ -140,7 +153,8 @@ async function sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody }) 
     threadId: sendResp.data.threadId,
     messageId: sendResp.data.id,
     to: recipientEmail,
-    subject: subject || '(no subject)'
+    subject: subject || '(no subject)',
+    replyTo: replyTo || null
   };
 }
 
@@ -161,7 +175,7 @@ function textToSimpleHtml(text) {
 
 // RFC 2822 raw message builder — always multipart/alternative with both a
 // text/plain and text/html part. Parts are base64-encoded so UTF-8 is safe.
-function buildRawEmail({ to, subject, body, htmlBody, inReplyTo, references }) {
+function buildRawEmail({ to, subject, body, htmlBody, inReplyTo, references, replyTo }) {
   const effectiveHtml = htmlBody || textToSimpleHtml(body);
   const boundary = '=_alt_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -176,6 +190,7 @@ function buildRawEmail({ to, subject, body, htmlBody, inReplyTo, references }) {
 
   if (inReplyTo) lines.push(`In-Reply-To: ${inReplyTo}`);
   if (references) lines.push(`References: ${references}`);
+  if (replyTo) lines.push(`Reply-To: ${replyTo}`);
 
   lines.push(
     '',

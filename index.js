@@ -5,7 +5,7 @@ const { sendEmail } = require('./sender.js');
 const { log } = require('./helpers.js');
 const { getAccount, upsertAccount, setAccountDisabled, deleteAccount, recordSend, deleteApiKeysForAccount } = require('./db.js');
 const { verifyState, buildAuthUrl, exchangeCode, revokeToken } = require('./oauth.js');
-const { getAccountStats, getRecentSends, getErrorBreakdown } = require('./stats.js');
+const { getAccountStats, getRecentSends, getErrorBreakdown, getReplyToValues } = require('./stats.js');
 const { getSession, setSession, clearSession, setFlash, consumeFlash, getCsrfToken, verifyCsrfToken } = require('./session.js');
 const apikeys = require('./apikeys.js');
 const pages = require('./pages.js');
@@ -118,7 +118,10 @@ async function handleHome(req, res) {
   const newKey = (flash && flash.kind === 'new_key')
     ? { plaintext: flash.plaintext, label: flash.label }
     : null;
-  return renderUserDashboard(req, res, session.email, { newKey });
+  const replyToFilter = req.query.replyTo
+    ? String(req.query.replyTo).slice(0, 255).trim().toLowerCase()
+    : '';
+  return renderUserDashboard(req, res, session.email, { newKey, replyToFilter });
 }
 
 function handleLoginPage(req, res) {
@@ -307,11 +310,13 @@ async function renderUserDashboard(req, res, email, opts = {}) {
     ]);
     const summary = allStats.find((s) => s.email === email) || null;
 
-    let recent = [], errors = [];
+    const replyToFilter = opts.replyToFilter || '';
+    let recent = [], errors = [], replyToOptions = [];
     if (summary) {
-      [recent, errors] = await Promise.all([
-        getRecentSends(email, 50),
-        getErrorBreakdown(email, 30)
+      [recent, errors, replyToOptions] = await Promise.all([
+        getRecentSends(email, 50, replyToFilter ? { replyTo: replyToFilter } : {}),
+        getErrorBreakdown(email, 30),
+        getReplyToValues(email, 50)
       ]);
     }
 
@@ -323,7 +328,9 @@ async function renderUserDashboard(req, res, email, opts = {}) {
       errors,
       keys,
       newKey: opts.newKey || null,
-      sendUrl: getSendUrl(req)
+      sendUrl: getSendUrl(req),
+      replyToFilter,
+      replyToOptions
     }));
   } catch (e) {
     log("Error", `User dashboard failed for ${email}: ${e.message}`);
@@ -435,7 +442,7 @@ async function handleSend(req, res) {
   if (!accountEmail) return res.status(401).json({ error: 'Unauthorized' });
 
   const body = req.body || {};
-  const { threadId, recipientEmail, subject, htmlBody } = body;
+  const { threadId, recipientEmail, subject, htmlBody, replyTo } = body;
   const emailBody = body.body;
 
   if (!emailBody) return res.status(400).json({ error: "Missing required field: body" });
@@ -449,20 +456,21 @@ async function handleSend(req, res) {
   } catch (e) {
     await recordSend({
       accountEmail, recipient: recipientEmail, subject, threadId,
-      mode: null, status: 'error', errorMessage: e.message
+      mode: null, status: 'error', errorMessage: e.message, replyTo
     }).catch(() => {});
     return res.status(400).json({ error: e.message });
   }
 
   try {
-    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, htmlBody });
+    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, htmlBody, replyTo });
     await recordSend({
       accountEmail,
       recipient: result.to,
       subject: result.subject,
       threadId: result.threadId,
       mode: result.mode,
-      status: 'ok'
+      status: 'ok',
+      replyTo: result.replyTo
     }).catch((e) => log("Error", `Failed to record send log: ${e.message}`));
     return res.status(200).json({ status: "ok", ...result });
   } catch (e) {
@@ -474,7 +482,8 @@ async function handleSend(req, res) {
       threadId,
       mode: null,
       status: 'error',
-      errorMessage: e.message
+      errorMessage: e.message,
+      replyTo
     }).catch(() => {});
     return res.status(500).json({ status: "error", error: e.message });
   }

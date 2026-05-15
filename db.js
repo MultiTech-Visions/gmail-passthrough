@@ -61,11 +61,22 @@ async function ensureSchema() {
         mode ENUM('new','reply') NULL,
         status ENUM('ok','error') NOT NULL,
         error_message TEXT NULL,
+        reply_to VARCHAR(255) NULL,
         sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_account_sent (account_email, sent_at),
-        INDEX idx_status_sent (status, sent_at)
+        INDEX idx_status_sent (status, sent_at),
+        INDEX idx_account_replyto (account_email, reply_to)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+    // Migration for pre-existing deployments missing reply_to.
+    const [logCols] = await conn.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = 'send_logs' AND column_name = 'reply_to'`
+    );
+    if (Number(logCols[0].c) === 0) {
+      await conn.query(`ALTER TABLE send_logs ADD COLUMN reply_to VARCHAR(255) NULL`);
+      await conn.query(`ALTER TABLE send_logs ADD INDEX idx_account_replyto (account_email, reply_to)`);
+    }
     await conn.query(`
       CREATE TABLE IF NOT EXISTS api_keys (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -197,14 +208,14 @@ async function deleteApiKeysForAccount(accountEmail) {
   );
 }
 
-async function recordSend({ accountEmail, recipient, subject, threadId, mode, status, errorMessage }) {
+async function recordSend({ accountEmail, recipient, subject, threadId, mode, status, errorMessage, replyTo }) {
   await ensureSchema();
   const conn = await getPool().getConnection();
   try {
     await conn.query(
-      `INSERT INTO send_logs (account_email, recipient, subject, thread_id, mode, status, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [accountEmail.toLowerCase(), recipient || null, subject || null, threadId || null, mode || null, status, errorMessage || null]
+      `INSERT INTO send_logs (account_email, recipient, subject, thread_id, mode, status, error_message, reply_to)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [accountEmail.toLowerCase(), recipient || null, subject || null, threadId || null, mode || null, status, errorMessage || null, replyTo || null]
     );
     if (status === 'ok') {
       await conn.query(
