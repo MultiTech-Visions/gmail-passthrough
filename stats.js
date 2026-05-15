@@ -37,14 +37,35 @@ async function getAccountStats() {
   });
 }
 
-async function getRecentSends(email, limit = 50) {
+async function getRecentSends(email, limit = 50, { replyTo } = {}) {
+  await ensureSchema();
+  const safeLimit = Math.max(1, Math.min(500, Number.parseInt(limit, 10) || 50));
+  const params = [email.toLowerCase()];
+  let where = 'account_email = ?';
+  if (replyTo) {
+    where += ' AND reply_to = ?';
+    params.push(String(replyTo).toLowerCase());
+  }
+  const [rows] = await getPool().query(
+    `SELECT sent_at, recipient, subject, thread_id, mode, status, error_message, reply_to
+     FROM send_logs
+     WHERE ${where}
+     ORDER BY sent_at DESC
+     LIMIT ${safeLimit}`,
+    params
+  );
+  return rows;
+}
+
+async function getReplyToValues(email, limit = 50) {
   await ensureSchema();
   const safeLimit = Math.max(1, Math.min(500, Number.parseInt(limit, 10) || 50));
   const [rows] = await getPool().query(
-    `SELECT sent_at, recipient, subject, thread_id, mode, status, error_message
+    `SELECT reply_to, COUNT(*) AS count, MAX(sent_at) AS last_seen
      FROM send_logs
-     WHERE account_email = ?
-     ORDER BY sent_at DESC
+     WHERE account_email = ? AND reply_to IS NOT NULL
+     GROUP BY reply_to
+     ORDER BY last_seen DESC
      LIMIT ${safeLimit}`,
     [email.toLowerCase()]
   );
@@ -68,4 +89,4 @@ async function getErrorBreakdown(email, days = 30) {
   return rows;
 }
 
-module.exports = { getAccountStats, getRecentSends, getErrorBreakdown };
+module.exports = { getAccountStats, getRecentSends, getErrorBreakdown, getReplyToValues };

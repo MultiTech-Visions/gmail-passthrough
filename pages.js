@@ -140,7 +140,7 @@ function fmtDate(d) {
 // exists — there's no separate "connect" step. `summary` is null only in
 // the unusual case where the cookie outlived the DB row (e.g. the account
 // was removed via /admin/unenroll); in that case we show a re-sign-in card.
-function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null, sendUrl = '' }) {
+function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null, sendUrl = '', replyToFilter = '', replyToOptions = [] }) {
   const missing = !summary;
   const disabled = !!(summary && summary.disabled);
 
@@ -192,8 +192,30 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
   `;
 
   const recentBlock = missing ? '' : (() => {
+    const datalistId = 'reply-to-options';
+    const datalist = replyToOptions.length
+      ? `<datalist id="${datalistId}">${replyToOptions.map((o) => `<option value="${esc(o.reply_to)}">`).join('')}</datalist>`
+      : '';
+    const activeFilter = replyToFilter
+      ? `<span class="pill">filter: ${esc(replyToFilter)}</span> <a class="muted" href="/" style="font-size:0.85rem;">clear</a>`
+      : '';
+    const filterForm = `
+      <form method="GET" action="/" class="row" style="margin: 0 0 0.75rem;">
+        <label class="grow" style="display:flex; align-items:center; gap:0.5rem;">
+          <span class="muted" style="font-size:0.8rem;">Filter by Reply-To</span>
+          <input name="replyTo" type="text" maxlength="255"
+                 value="${esc(replyToFilter)}"
+                 list="${datalistId}"
+                 placeholder="e.g. support@example.com"
+                 style="flex:1; padding:0.45rem; border:1px solid #ccc; border-radius:6px; font:inherit;">
+        </label>
+        <button class="btn secondary" type="submit">Apply</button>
+        ${activeFilter}
+      </form>
+      ${datalist}`;
+
     if (!recent || recent.length === 0) {
-      return `<h2>Recent sends</h2><div class="empty">No sends recorded yet.</div>`;
+      return `<h2>Recent sends</h2>${filterForm}<div class="empty">${replyToFilter ? 'No sends match that Reply-To.' : 'No sends recorded yet.'}</div>`;
     }
     const rows = recent.map((r) => `
       <tr>
@@ -201,12 +223,14 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
         <td><span class="pill ${r.status === 'ok' ? 'ok' : 'err'}">${esc(r.status)}</span> ${r.mode ? `<span class="muted">${esc(r.mode)}</span>` : ''}</td>
         <td><code>${esc(r.recipient || '—')}</code></td>
         <td>${esc(r.subject || '')}</td>
+        <td>${r.reply_to ? `<code>${esc(r.reply_to)}</code>` : '<span class="muted">—</span>'}</td>
         <td class="muted">${esc(r.error_message || '')}</td>
       </tr>`).join('');
     return `
       <h2>Recent sends</h2>
+      ${filterForm}
       <table>
-        <thead><tr><th>When</th><th>Status</th><th>Recipient</th><th>Subject</th><th>Error</th></tr></thead>
+        <thead><tr><th>When</th><th>Status</th><th>Recipient</th><th>Subject</th><th>Reply-To</th><th>Error</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   })();
@@ -308,6 +332,8 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
           <dd>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</dd>
           <dt><code>htmlBody</code><span class="req">optional</span></dt>
           <dd>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</dd>
+          <dt><code>replyTo</code><span class="req">optional</span></dt>
+          <dd>Sets the <code>Reply-To</code> header so replies go to a specific address instead of the sending account. Recorded with the send log and filterable above.</dd>
         </dl>
       </div>
       <div class="card">
