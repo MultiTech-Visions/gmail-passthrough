@@ -140,7 +140,7 @@ function fmtDate(d) {
 // exists — there's no separate "connect" step. `summary` is null only in
 // the unusual case where the cookie outlived the DB row (e.g. the account
 // was removed via /admin/unenroll); in that case we show a re-sign-in card.
-function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null, sendUrl = '', replyToFilter = '', replyToOptions = [] }) {
+function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], newKey = null, sendUrl = '', filters = {}, replyToOptions = [] }) {
   const missing = !summary;
   const disabled = !!(summary && summary.disabled);
 
@@ -192,30 +192,57 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
   `;
 
   const recentBlock = missing ? '' : (() => {
+    const f = filters || {};
+    const hasAny = !!(f.replyTo || f.status || f.mode || f.recipient || f.subject || f.threadId || f.since || f.until);
     const datalistId = 'reply-to-options';
     const datalist = replyToOptions.length
       ? `<datalist id="${datalistId}">${replyToOptions.map((o) => `<option value="${esc(o.reply_to)}">`).join('')}</datalist>`
       : '';
-    const activeFilter = replyToFilter
-      ? `<span class="pill">filter: ${esc(replyToFilter)}</span> <a class="muted" href="/" style="font-size:0.85rem;">clear</a>`
-      : '';
+    const sel = (cur, val) => cur === val ? ' selected' : '';
+    const inputStyle = 'width:100%; padding:0.4rem; border:1px solid #ccc; border-radius:6px; font:inherit;';
     const filterForm = `
-      <form method="GET" action="/" class="row" style="margin: 0 0 0.75rem;">
-        <label class="grow" style="display:flex; align-items:center; gap:0.5rem;">
-          <span class="muted" style="font-size:0.8rem;">Filter by Reply-To</span>
-          <input name="replyTo" type="text" maxlength="255"
-                 value="${esc(replyToFilter)}"
-                 list="${datalistId}"
-                 placeholder="e.g. support@example.com"
-                 style="flex:1; padding:0.45rem; border:1px solid #ccc; border-radius:6px; font:inherit;">
-        </label>
-        <button class="btn secondary" type="submit">Apply</button>
-        ${activeFilter}
+      <form method="GET" action="/" class="card" style="padding: 0.75rem 1rem; margin: 0 0 0.75rem;">
+        <div style="display:grid; gap:0.5rem 0.75rem; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));">
+          <label><div class="muted" style="font-size:0.75rem;">Reply-To</div>
+            <input name="replyTo" type="text" maxlength="255" list="${datalistId}"
+                   value="${esc(f.replyTo || '')}" placeholder="support@example.com" style="${inputStyle}"></label>
+          <label><div class="muted" style="font-size:0.75rem;">Status</div>
+            <select name="status" style="${inputStyle}">
+              <option value=""${sel(f.status, '')}>Any</option>
+              <option value="ok"${sel(f.status, 'ok')}>ok</option>
+              <option value="error"${sel(f.status, 'error')}>error</option>
+            </select></label>
+          <label><div class="muted" style="font-size:0.75rem;">Mode</div>
+            <select name="mode" style="${inputStyle}">
+              <option value=""${sel(f.mode, '')}>Any</option>
+              <option value="new"${sel(f.mode, 'new')}>new</option>
+              <option value="reply"${sel(f.mode, 'reply')}>reply</option>
+            </select></label>
+          <label><div class="muted" style="font-size:0.75rem;">Recipient contains</div>
+            <input name="recipient" type="text" maxlength="255"
+                   value="${esc(f.recipient || '')}" placeholder="@example.com" style="${inputStyle}"></label>
+          <label><div class="muted" style="font-size:0.75rem;">Subject contains</div>
+            <input name="subject" type="text" maxlength="255"
+                   value="${esc(f.subject || '')}" placeholder="invoice" style="${inputStyle}"></label>
+          <label><div class="muted" style="font-size:0.75rem;">Thread ID</div>
+            <input name="threadId" type="text" maxlength="255"
+                   value="${esc(f.threadId || '')}" style="${inputStyle}"></label>
+          <label><div class="muted" style="font-size:0.75rem;">Since</div>
+            <input name="since" type="datetime-local"
+                   value="${esc(f.since || '')}" style="${inputStyle}"></label>
+          <label><div class="muted" style="font-size:0.75rem;">Until</div>
+            <input name="until" type="datetime-local"
+                   value="${esc(f.until || '')}" style="${inputStyle}"></label>
+        </div>
+        <div class="row" style="margin-top:0.6rem;">
+          <button class="btn" type="submit">Apply filters</button>
+          ${hasAny ? `<a class="btn secondary" href="/">Clear</a>` : ''}
+        </div>
       </form>
       ${datalist}`;
 
     if (!recent || recent.length === 0) {
-      return `<h2>Recent sends</h2>${filterForm}<div class="empty">${replyToFilter ? 'No sends match that Reply-To.' : 'No sends recorded yet.'}</div>`;
+      return `<h2>Recent sends</h2>${filterForm}<div class="empty">${hasAny ? 'No sends match these filters.' : 'No sends recorded yet.'}</div>`;
     }
     const rows = recent.map((r) => `
       <tr>
