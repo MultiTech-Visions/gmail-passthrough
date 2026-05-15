@@ -118,10 +118,34 @@ async function handleHome(req, res) {
   const newKey = (flash && flash.kind === 'new_key')
     ? { plaintext: flash.plaintext, label: flash.label }
     : null;
-  const replyToFilter = req.query.replyTo
-    ? String(req.query.replyTo).slice(0, 255).trim().toLowerCase()
-    : '';
-  return renderUserDashboard(req, res, session.email, { newKey, replyToFilter });
+  const filters = parseRecentFilters(req.query);
+  return renderUserDashboard(req, res, session.email, { newKey, filters });
+}
+
+// Pull Recent-Sends filter values from req.query. Each filter is a trimmed
+// string (or '' if absent); the renderer echoes them back into the form and
+// stats.js translates them into SQL predicates.
+function parseRecentFilters(q) {
+  const s = (v, max = 255) => (v ? String(v).slice(0, max).trim() : '');
+  const lower = (v) => s(v).toLowerCase();
+  const parseDate = (v) => {
+    const str = s(v, 32);
+    if (!str) return null;
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  };
+  return {
+    replyTo: lower(q.replyTo),
+    status: ['ok', 'error'].includes(lower(q.status)) ? lower(q.status) : '',
+    mode: ['new', 'reply'].includes(lower(q.mode)) ? lower(q.mode) : '',
+    recipient: lower(q.recipient),
+    subject: s(q.subject),
+    threadId: s(q.threadId),
+    since: s(q.since, 32),
+    until: s(q.until, 32),
+    sinceDate: parseDate(q.since),
+    untilDate: parseDate(q.until)
+  };
 }
 
 function handleLoginPage(req, res) {
@@ -310,11 +334,20 @@ async function renderUserDashboard(req, res, email, opts = {}) {
     ]);
     const summary = allStats.find((s) => s.email === email) || null;
 
-    const replyToFilter = opts.replyToFilter || '';
+    const filters = opts.filters || {};
     let recent = [], errors = [], replyToOptions = [];
     if (summary) {
       [recent, errors, replyToOptions] = await Promise.all([
-        getRecentSends(email, 50, replyToFilter ? { replyTo: replyToFilter } : {}),
+        getRecentSends(email, 50, {
+          replyTo: filters.replyTo,
+          status: filters.status,
+          mode: filters.mode,
+          recipient: filters.recipient,
+          subject: filters.subject,
+          threadId: filters.threadId,
+          since: filters.sinceDate,
+          until: filters.untilDate
+        }),
         getErrorBreakdown(email, 30),
         getReplyToValues(email, 50)
       ]);
@@ -329,7 +362,7 @@ async function renderUserDashboard(req, res, email, opts = {}) {
       keys,
       newKey: opts.newKey || null,
       sendUrl: getSendUrl(req),
-      replyToFilter,
+      filters,
       replyToOptions
     }));
   } catch (e) {
@@ -442,7 +475,7 @@ async function handleSend(req, res) {
   if (!accountEmail) return res.status(401).json({ error: 'Unauthorized' });
 
   const body = req.body || {};
-  const { threadId, recipientEmail, subject, htmlBody, replyTo } = body;
+  const { threadId, recipientEmail, subject, replyTo } = body;
   const emailBody = body.body;
 
   if (!emailBody) return res.status(400).json({ error: "Missing required field: body" });
@@ -462,7 +495,7 @@ async function handleSend(req, res) {
   }
 
   try {
-    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, htmlBody, replyTo });
+    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, replyTo });
     await recordSend({
       accountEmail,
       recipient: result.to,

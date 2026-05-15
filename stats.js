@@ -37,19 +37,49 @@ async function getAccountStats() {
   });
 }
 
-async function getRecentSends(email, limit = 50, { replyTo } = {}) {
+async function getRecentSends(email, limit = 50, filters = {}) {
   await ensureSchema();
   const safeLimit = Math.max(1, Math.min(500, Number.parseInt(limit, 10) || 50));
   const params = [email.toLowerCase()];
-  let where = 'account_email = ?';
-  if (replyTo) {
-    where += ' AND reply_to = ?';
-    params.push(String(replyTo).toLowerCase());
+  const where = ['account_email = ?'];
+
+  if (filters.replyTo) {
+    where.push('reply_to = ?');
+    params.push(String(filters.replyTo).toLowerCase());
   }
+  if (filters.status === 'ok' || filters.status === 'error') {
+    where.push('status = ?');
+    params.push(filters.status);
+  }
+  if (filters.mode === 'new' || filters.mode === 'reply') {
+    where.push('mode = ?');
+    params.push(filters.mode);
+  }
+  if (filters.recipient) {
+    where.push('recipient LIKE ?');
+    params.push(`%${String(filters.recipient).toLowerCase()}%`);
+  }
+  if (filters.subject) {
+    where.push('subject LIKE ?');
+    params.push(`%${filters.subject}%`);
+  }
+  if (filters.threadId) {
+    where.push('thread_id = ?');
+    params.push(String(filters.threadId));
+  }
+  if (filters.since instanceof Date && !isNaN(filters.since)) {
+    where.push('sent_at >= ?');
+    params.push(filters.since);
+  }
+  if (filters.until instanceof Date && !isNaN(filters.until)) {
+    where.push('sent_at <= ?');
+    params.push(filters.until);
+  }
+
   const [rows] = await getPool().query(
     `SELECT sent_at, recipient, subject, thread_id, mode, status, error_message, reply_to
      FROM send_logs
-     WHERE ${where}
+     WHERE ${where.join(' AND ')}
      ORDER BY sent_at DESC
      LIMIT ${safeLimit}`,
     params
