@@ -475,7 +475,7 @@ async function handleSend(req, res) {
   if (!accountEmail) return res.status(401).json({ error: 'Unauthorized' });
 
   const body = req.body || {};
-  const { threadId, recipientEmail, subject, htmlBody, replyTo } = body;
+  const { threadId, recipientEmail, subject, replyTo } = body;
   const emailBody = body.body;
 
   if (!emailBody) return res.status(400).json({ error: "Missing required field: body" });
@@ -495,7 +495,7 @@ async function handleSend(req, res) {
   }
 
   try {
-    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, htmlBody, replyTo });
+    const result = await sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body: emailBody, replyTo });
     await recordSend({
       accountEmail,
       recipient: result.to,

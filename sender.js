@@ -4,11 +4,12 @@ const { log } = require('./helpers.js');
 // (with proper In-Reply-To / References headers so it threads in the recipient's
 // client). Otherwise: send a brand-new email to recipientEmail.
 //
-// Every email goes out as multipart/alternative with both a text/plain and
-// text/html part. If htmlBody is omitted, an HTML part is auto-generated from
-// body (HTML-escaped, newlines -> <br>).
+// Callers send a single `body`. If it contains HTML tags it's treated as HTML
+// and a plain-text counterpart is derived; otherwise it's treated as plain
+// text and a simple HTML counterpart is generated. Either way the wire format
+// is multipart/alternative with both parts.
 
-async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body, htmlBody, replyTo }) {
+async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subject, body, replyTo }) {
   if (!body) {
     throw new Error("Missing required field: body");
   }
@@ -35,14 +36,14 @@ async function sendEmail({ gmail, accountEmail, threadId, recipientEmail, subjec
   }
 
   if (thread && thread.messages && thread.messages.length > 0) {
-    return await replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody, replyTo: cleanReplyTo });
+    return await replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, replyTo: cleanReplyTo });
   }
 
   if (!recipientEmail) {
     throw new Error("No thread found and no recipientEmail provided — cannot send.");
   }
 
-  return await sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody, replyTo: cleanReplyTo });
+  return await sendNewEmail({ gmail, recipientEmail, subject, body, replyTo: cleanReplyTo });
 }
 
 // Strip CR/LF (and surrounding whitespace) to prevent header injection.
@@ -63,7 +64,7 @@ function parseFirstAddress(header) {
   return header.split(',')[0].trim();
 }
 
-async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, htmlBody, replyTo }) {
+async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subject, body, replyTo }) {
   const lastMessage = thread.messages[thread.messages.length - 1];
   const headers = lastMessage.payload.headers;
 
@@ -105,7 +106,6 @@ async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subj
     to,
     subject: replySubject,
     body,
-    htmlBody,
     inReplyTo: originalMessageId || undefined,
     references: references || undefined,
     replyTo: replyTo || undefined
@@ -132,12 +132,11 @@ async function replyToThread({ gmail, accountEmail, thread, recipientEmail, subj
 }
 
 
-async function sendNewEmail({ gmail, recipientEmail, subject, body, htmlBody, replyTo }) {
+async function sendNewEmail({ gmail, recipientEmail, subject, body, replyTo }) {
   const raw = buildRawEmail({
     to: recipientEmail,
     subject: subject || '(no subject)',
     body,
-    htmlBody,
     replyTo: replyTo || undefined
   });
 
@@ -172,11 +171,36 @@ function textToSimpleHtml(text) {
   return escapeHtml(text).replace(/\r\n|\r|\n/g, '<br>\n');
 }
 
+// Heuristic: treat input as HTML if it contains a recognizable tag.
+function looksLikeHtml(s) {
+  return /<\/?[a-z][\s\S]*?>/i.test(s);
+}
+
+// Strip tags + decode the handful of entities we emit ourselves. Good enough
+// for deriving a readable text/plain alternative from an HTML body — not a
+// general-purpose HTML-to-text converter.
+function htmlToSimpleText(html) {
+  return html
+    .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 
 // RFC 2822 raw message builder — always multipart/alternative with both a
 // text/plain and text/html part. Parts are base64-encoded so UTF-8 is safe.
-function buildRawEmail({ to, subject, body, htmlBody, inReplyTo, references, replyTo }) {
-  const effectiveHtml = htmlBody || textToSimpleHtml(body);
+function buildRawEmail({ to, subject, body, inReplyTo, references, replyTo }) {
+  const isHtml = looksLikeHtml(body);
+  const textPart = isHtml ? htmlToSimpleText(body) : body;
+  const htmlPart = isHtml ? body : textToSimpleHtml(body);
   const boundary = '=_alt_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   const encode = (s) => Buffer.from(s, 'utf-8').toString('base64').replace(/(.{76})/g, '$1\r\n');
@@ -198,12 +222,12 @@ function buildRawEmail({ to, subject, body, htmlBody, inReplyTo, references, rep
     'Content-Type: text/plain; charset=utf-8',
     'Content-Transfer-Encoding: base64',
     '',
-    encode(body),
+    encode(textPart),
     `--${boundary}`,
     'Content-Type: text/html; charset=utf-8',
     'Content-Transfer-Encoding: base64',
     '',
-    encode(effectiveHtml),
+    encode(htmlPart),
     `--${boundary}--`,
     ''
   );

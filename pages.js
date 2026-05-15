@@ -350,15 +350,13 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
         <strong>Body fields</strong>
         <dl class="fields">
           <dt><code>body</code><span class="req">required</span></dt>
-          <dd>Plain-text body (newlines preserved).</dd>
+          <dd>Either plain text (newlines preserved) or HTML — detected automatically. The other format is derived so the message goes out as multipart/alternative.</dd>
           <dt><code>recipientEmail</code><span class="req">conditional</span></dt>
           <dd>Required unless <code>threadId</code> is provided (in which case the reply-to address is read from the thread).</dd>
           <dt><code>threadId</code><span class="req">optional</span></dt>
           <dd>Gmail thread ID. If found, the message is sent as an in-thread reply with the right <code>In-Reply-To</code> / <code>References</code> headers.</dd>
           <dt><code>subject</code><span class="req">optional</span></dt>
           <dd>Defaults to <code>Re: &lt;original subject&gt;</code> on replies, <code>(no subject)</code> otherwise.</dd>
-          <dt><code>htmlBody</code><span class="req">optional</span></dt>
-          <dd>HTML alternative. Auto-generated from <code>body</code> if omitted (escaped, newlines &rarr; &lt;br&gt;).</dd>
           <dt><code>replyTo</code><span class="req">optional</span></dt>
           <dd>Sets the <code>Reply-To</code> header so replies go to a specific address instead of the sending account. Recorded with the send log and filterable above.</dd>
         </dl>
