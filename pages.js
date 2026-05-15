@@ -350,7 +350,7 @@ function userDashboard({ email, csrfToken, summary, recent, errors, keys = [], n
         <strong>Body fields</strong>
         <dl class="fields">
           <dt><code>body</code><span class="req">required</span></dt>
-          <dd>Either plain text (newlines preserved) or HTML — detected automatically. The other format is derived so the message goes out as multipart/alternative.</dd>
+          <dd>The text for the email; either plain text or HTML.</dd>
           <dt><code>recipientEmail</code><span class="req">conditional</span></dt>
           <dd>Required unless <code>threadId</code> is provided (in which case the reply-to address is read from the thread).</dd>
           <dt><code>threadId</code><span class="req">optional</span></dt>
