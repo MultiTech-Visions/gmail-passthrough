@@ -167,33 +167,52 @@ Request body:
 
 ```json
 {
-  "body":           "The plain-text body",
-  "htmlBody":       "<p>The HTML body</p>",
+  "body":           "Hello, world! Or <p>some HTML</p>",
   "recipientEmail": "patient@example.com",
   "threadId":       "abc123...",
-  "subject":        "Your Subject"
+  "subject":        "Your Subject",
+  "replyTo":        "support@example.com"
 }
 ```
 
 | Field            | Required? | Notes                                                           |
 |------------------|-----------|-----------------------------------------------------------------|
-| `body`           | yes       | Plain-text body (newlines preserved)                            |
-| `htmlBody`       | no        | HTML body. If omitted, auto-generated from `body`               |
+| `body`           | yes       | Plain text or HTML — auto-detected. The other format is derived |
 | `recipientEmail` | see notes | Required if no `threadId`. Overrides the auto-detected reply-to |
 | `threadId`       | no        | Gmail thread ID; if found, reply goes in-thread                 |
 | `subject`        | no        | On replies, defaults to `Re: <original subject>`                |
+| `replyTo`        | no        | Sets the `Reply-To` header. Recorded with the send log so multiple apps can share one sending account but route replies to different inboxes |
 
 Every email is sent as `multipart/alternative` with both a `text/plain` and a
-`text/html` part. Every attempt — success or error — is logged to
-`send_logs`.
+`text/html` part — whichever you didn't supply is generated from the one you
+did. Every attempt — success or error — is logged to `send_logs` along with
+the `replyTo` value.
 
 Success response:
 
 ```json
-{ "status": "ok", "mode": "reply", "threadId": "...", "messageId": "...", "to": "...", "subject": "..." }
+{ "status": "ok", "mode": "reply", "threadId": "...", "messageId": "...", "to": "...", "subject": "...", "replyTo": "..." }
 ```
 
 `mode` is `"reply"` when the message went in-thread, `"new"` otherwise.
+
+
+## Investigating activity
+
+The user dashboard's **Recent sends** panel has a filter card so you can dig
+into the log. Filters compose (AND) and all are optional:
+
+- **Reply-To** — exact match, with autocomplete from values you've actually used
+- **Status** — `ok` / `error`
+- **Mode** — `new` / `reply`
+- **Recipient contains** — substring
+- **Subject contains** — substring
+- **Thread ID** — exact match
+- **Since / Until** — datetime range
+
+Filters are driven by query-string params on `/` (e.g.
+`/?replyTo=support@example.com&status=error&since=2026-05-01T00:00`),
+so they're shareable / bookmarkable.
 
 
 ## Schema
@@ -229,9 +248,11 @@ CREATE TABLE send_logs (
   mode           ENUM('new','reply') NULL,
   status         ENUM('ok','error')  NOT NULL,
   error_message  TEXT         NULL,
+  reply_to       VARCHAR(255) NULL,
   sent_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_account_sent (account_email, sent_at),
-  INDEX idx_status_sent  (status, sent_at)
+  INDEX idx_account_sent     (account_email, sent_at),
+  INDEX idx_status_sent      (status, sent_at),
+  INDEX idx_account_replyto  (account_email, reply_to)
 );
 ```
 
