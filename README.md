@@ -149,8 +149,16 @@ The schema is auto-applied on first request via `CREATE TABLE IF NOT EXISTS`.
 | `DB_USER` / `DB_PASS` / `DB_NAME` | MySQL credentials                                                    |
 | `ACCOUNTS_CONFIG`          | (legacy) Pre-DB JSON-keyed accounts; used as a fallback if DB has no row.   |
 
-Generate `API_KEY` / `STATE_SECRET` with `openssl rand -hex 32`.
+Generate `API_KEY` / `STATE_SECRET` with the following:
+```json
+function randHex(bytes = 32) {
+  const arr = new Uint8Array(bytes);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+}
 
+randHex();
+```
 
 ## `POST /send`
 
